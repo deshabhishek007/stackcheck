@@ -10,6 +10,7 @@ https://stackcheck.yourdomain.com/stripe.com
 The report covers **hosting, CDN, web server, CMS, ecommerce, frameworks, JS libraries, analytics, tag managers,
 marketing pixels, payment providers, live chat, cookie consent, DNS and email providers, SSL certificate and
 security headers**. Each detection shows the evidence it's based on and a confidence score.
+For WordPress sites it also lists the **theme and plugins** visible on the homepage.
 
 - **One Python file, no dependencies.** Needs only Python 3.9+ and the standard library.
 - **No third-party APIs.** It talks to the target site and a DNS resolver directly.
@@ -21,7 +22,7 @@ security headers**. Each detection shows the evidence it's based on and a confid
 ## Quick start
 
 ```bash
-git clone <your-repo-url> stackcheck && cd stackcheck
+git clone https://github.com/deshabhishek007/stackcheck.git && cd stackcheck
 python3 stackcheck.py
 # → open http://localhost:8080/github.com
 ```
@@ -73,6 +74,10 @@ curl -s http://localhost:8080/shopify.com | jq '.technologies[] | {name, categor
       ]
     }
   ],
+  "wordpress": {   // null when the site isn't WordPress
+    "themes":  [ { "slug": "astra-child", "name": "Astra Child", "version": "1.1.8", "role": "child theme", "parent": "astra" } ],
+    "plugins": [ { "slug": "wordpress-seo", "name": "Yoast SEO", "version": "22.6", "mu": false, "assets": 0, "evidence": ["..."] } ]
+  },
   "http":  { "final_url": "...", "status": 200, "response_ms": 125, "redirects": [], "headers": {}, "cookies": [] },
   "tls":   { "valid": true, "issuer": "R11", "protocol": "TLSv1.3", "alpn": "h2", "days_left": 61 },
   "dns":   { "zone": "...", "A": [], "AAAA": [], "NS": [], "MX": [], "TXT": [], "CAA": [], "DMARC": [], "PTR": {}, "dnssec": false },
@@ -107,6 +112,22 @@ For each scan StackCheck runs these steps in parallel (usually 1–3 seconds in 
 When several pieces of evidence point to the same technology they are combined as `1 − Π(1 − cᵢ)`.
 **High** means 85 or more, **medium** 60–84, **low** below 60. A technology can also be *implied* by another
 (for example Next.js implies React). Implied technologies get a lower confidence and are labelled as implied.
+
+### WordPress themes and plugins
+
+When a site looks like WordPress, StackCheck also lists its theme and plugins in a **WordPress** tab
+(and under `wordpress` in the JSON):
+
+- **Files on the homepage.** Any path under `/wp-content/plugins/`, `/wp-content/mu-plugins/` or `/wp-content/themes/`,
+  including escaped paths inside inline JSON. Versions come from the `?ver=` query string; a `?ver=` equal to the
+  WordPress core version is ignored, because that's WordPress's default rather than the plugin's own version.
+- **HTML comments.** Some SEO and cache plugins load no files but leave a comment: Yoast SEO, Rank Math,
+  All in One SEO, Site Kit, WP Rocket, LiteSpeed Cache, W3 Total Cache and WP Super Cache.
+- **The theme's `style.css`.** One extra request reads the theme header for its real name, version, author and
+  parent. A child theme's parent is listed too, even when the page doesn't load it directly.
+
+Only what's visible from outside shows up. Plugins that run only in the admin or on other pages, or whose files
+are merged by an optimiser such as Autoptimize, won't be listed.
 
 ### Adding a technology
 
