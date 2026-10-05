@@ -4,7 +4,7 @@ StackCheck - a self-hosted website technology scanner.
 
 Run it, then visit  http://localhost:8080/example.com  to see what powers example.com.
 
-  python3 stackcheck.py                    # serve on 0.0.0.0:8080
+  python3 stackcheck.py                    # serve on 127.0.0.1:8080
   python3 stackcheck.py --port 3000
   python3 stackcheck.py scan example.com   # one-off scan, prints JSON
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hmac
 import html as html_lib
 import http.client
 import ipaddress
@@ -42,8 +43,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 __version__ = "1.0.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/129.0 Safari/537.36 StackCheck/" + __version__)
+# Browser-like so sites serve their normal page, but it names StackCheck and links to it so site owners can
+# see what the requests are and block them if they want.
+DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                      f"Chrome/129.0 Safari/537.36 StackCheck/{__version__} "
+                      "(+https://github.com/deshabhishek007/stackcheck)")
 
 
 # --------------------------------------------------------------------------- config
@@ -59,10 +63,24 @@ def env(name, default):
     return v
 
 
+def _system_resolvers() -> list[str]:
+    """Nameservers from /etc/resolv.conf, for STACKCHECK_DNS=system."""
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8") as f:
+            return [m.group(1) for m in re.finditer(r"(?m)^\s*nameserver\s+(\S+)", f.read())]
+    except OSError:
+        return []
+
+
+def _split(value: str) -> list[str]:
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
 class Config:
-    host = env("HOST", "0.0.0.0")
+    host = env("HOST", "127.0.0.1")           # 0.0.0.0 exposes it to the network (the Docker image sets that)
     port = env("PORT", 8080)
-    dns_servers = [s.strip() for s in env("DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
+    dns_servers = (_system_resolvers() if env("DNS", "").strip().lower() == "system"
+                   else _split(env("DNS", "1.1.1.1,8.8.8.8")))
     doh_url = env("DOH", "https://cloudflare-dns.com/dns-query")
     timeout = env("TIMEOUT", 10)              # seconds per network operation
     max_body = env("MAX_BODY", 3_000_000)     # bytes of HTML to read
@@ -71,6 +89,16 @@ class Config:
     rate_limit = env("RATE_LIMIT", 30)        # fresh scans per IP per minute; 0 disables
     allow_private = env("ALLOW_PRIVATE", False)  # allow scanning private/internal IPs (SSRF risk!)
     trust_proxy = env("TRUST_PROXY", False)   # honour X-Forwarded-For for rate limiting
+    allowed_hosts = _split(env("ALLOWED_HOSTS", ""))  # Host header names to answer; see effective_allowed_hosts()
+    cors = _split(env("CORS", ""))           # origins allowed to read the JSON API cross-site ("*" for any)
+    token = env("TOKEN", "")                  # if set, every request except /healthz needs this token
+    user_agent = env("USER_AGENT", DEFAULT_USER_AGENT)
+    max_scans = env("MAX_SCANS", 8)           # scans running at once; more wait, then get 503
+    max_connections = env("MAX_CONNECTIONS", 64)
+    client_timeout = env("CLIENT_TIMEOUT", 20)    # seconds a client may take to send its request
+    site_rate_limit = env("SITE_RATE_LIMIT", 10)  # fresh scans of one site (any subdomain) per minute
+    refresh_cooldown = env("REFRESH_COOLDOWN", 60)  # ?refresh=1 within this many seconds serves the cache
+    hosts: set[str] | None = None              # effective Host allowlist, set at startup; None = any
     fingerprints = env("FINGERPRINTS", os.path.join(HERE, "fingerprints.json"))
 
 
@@ -253,7 +281,7 @@ def _parse_dns(data: bytes, qtype: int):
 
 def _dns_doh(name: str, qtype: int, timeout: float):
     url = f"{Config.doh_url}?name={urllib.parse.quote(name)}&type={qtype}"
-    req = urllib.request.Request(url, headers={"Accept": "application/dns-json", "User-Agent": USER_AGENT})
+    req = urllib.request.Request(url, headers={"Accept": "application/dns-json", "User-Agent": Config.user_agent})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         j = json.loads(r.read())
     answers = []
@@ -525,7 +553,7 @@ def _open(url: str, verify: bool, scope: tuple[str, ...] | None):
                     urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor()):
         opener.add_handler(handler)
     req = urllib.request.Request(url, headers={
-        "User-Agent": USER_AGENT,
+        "User-Agent": Config.user_agent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate",
@@ -1379,6 +1407,12 @@ class TTLCache:
             self.data.pop(key, None)
         return None
 
+    def age(self, key) -> float | None:
+        """Seconds since `key` was cached, or None."""
+        with self.lock:
+            v = self.data.get(key)
+            return time.time() - v[0] if v else None
+
     def put(self, key, value):
         if Config.cache_ttl <= 0:
             return
@@ -1396,19 +1430,21 @@ class TTLCache:
 
 
 class RateLimiter:
-    def __init__(self):
+    def __init__(self, limit=lambda: Config.rate_limit):
+        self.limit = limit  # a callable, so tests and config changes take effect without rebuilding
         self.hits: dict[str, deque] = {}
         self.lock = threading.Lock()
 
-    def allow(self, ip: str) -> bool:
-        if Config.rate_limit <= 0:
+    def allow(self, key: str) -> bool:
+        limit = self.limit()
+        if limit <= 0:
             return True
         now = time.time()
         with self.lock:
-            q = self.hits.setdefault(ip, deque())
+            q = self.hits.setdefault(key, deque())
             while q and now - q[0] > 60:
                 q.popleft()
-            if len(q) >= Config.rate_limit:
+            if len(q) >= limit:
                 return False
             q.append(now)
             if len(self.hits) > 10000:
@@ -1416,8 +1452,28 @@ class RateLimiter:
             return True
 
 
+def site_key(domain: str) -> str:
+    """Group subdomains under one site for the per-site limit: a.b.example.com -> example.com,
+    shop.example.co.uk -> example.co.uk. A rough stand-in for the public suffix list."""
+    labels = domain.split(".")
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in ("co", "com", "net", "org", "gov", "ac", "edu"):
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
 CACHE = TTLCache()
-LIMITER = RateLimiter()
+LIMITER = RateLimiter()                                         # fresh scans per client IP
+SITE_LIMITER = RateLimiter(lambda: Config.site_rate_limit)     # fresh scans per target site
+_scan_slots: threading.BoundedSemaphore | None = None
+_scan_slots_lock = threading.Lock()
+
+
+def scan_slots() -> threading.BoundedSemaphore:
+    global _scan_slots
+    with _scan_slots_lock:
+        if _scan_slots is None:
+            _scan_slots = threading.BoundedSemaphore(max(1, Config.max_scans))
+        return _scan_slots
 _FP: Fingerprints | None = None
 
 
@@ -1433,11 +1489,21 @@ def cached_scan(domain: str, client_ip: str, refresh=False) -> dict:
     if not refresh and (hit := CACHE.get(domain)):
         return {**hit, "cached": True}
     with CACHE.lock_for(domain):  # collapse concurrent scans of the same domain
-        if not refresh and (hit := CACHE.get(domain)):
-            return {**hit, "cached": True}
+        hit = CACHE.get(domain)
+        age = CACHE.age(domain)
+        if hit and (not refresh or (age is not None and age < Config.refresh_cooldown)):
+            return {**hit, "cached": True}  # a rescan within the cooldown gets the fresh-enough report
         if not LIMITER.allow(client_ip):
             raise ScanError("Too many scans from your address. Please wait a minute.", 429)
-        result = scan(domain)
+        if not SITE_LIMITER.allow(site_key(domain)):
+            raise ScanError(f"Too many scans of {site_key(domain)} right now. Please wait a minute.", 429)
+        slots = scan_slots()
+        if not slots.acquire(timeout=Config.timeout * 2):
+            raise ScanError("StackCheck is busy with other scans. Please try again shortly.", 503)
+        try:
+            result = scan(domain)
+        finally:
+            slots.release()
         CACHE.put(domain, result)
         return {**result, "cached": False}
 
@@ -1455,19 +1521,90 @@ FAVICON = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect w
            b'rx="1.5" opacity=".6"/></g></svg>')
 
 
+def is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def effective_allowed_hosts(bind: str, allowed: list[str]) -> set[str] | None:
+    """Which Host header names the server answers. Checking it stops a web page in your browser from using
+    DNS rebinding to read a StackCheck running on your machine. None means any name.
+
+    STACKCHECK_ALLOWED_HOSTS wins ("*" for any). Otherwise a loopback-only server answers only localhost
+    names, and a server listening on the network answers any name (with a warning at startup)."""
+    if allowed:
+        return None if "*" in allowed else {h.lower().rstrip(".") for h in allowed}
+    if is_loopback(bind):
+        return {"localhost", "127.0.0.1", "::1"}
+    return None
+
+
+def host_name(header: str) -> str:
+    """'Example.com:8080' -> 'example.com', '[::1]:8080' -> '::1'."""
+    h = (header or "").strip().lower()
+    if h.startswith("["):
+        return h[1:h.find("]")] if "]" in h else h
+    return h.rsplit(":", 1)[0] if h.count(":") == 1 else h
+
+
+def token_from(authorization: str) -> str:
+    """The token from 'Bearer <token>' or HTTP Basic (any username, token as the password)."""
+    kind, _, value = (authorization or "").partition(" ")
+    if kind.lower() == "bearer":
+        return value.strip()
+    if kind.lower() == "basic":
+        try:
+            return base64.b64decode(value.strip(), validate=True).decode("utf-8").partition(":")[2]
+        except (ValueError, UnicodeDecodeError):
+            return ""
+    return ""
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "StackCheck/" + __version__
     protocol_version = "HTTP/1.1"
+    timeout = Config.client_timeout  # a client that sends its request too slowly is dropped
 
     def log_message(self, fmt, *args):
         sys.stderr.write(f"[{self.log_date_time_string()}] {self.client_ip()} {fmt % args}\n")
 
     def client_ip(self) -> str:
         if Config.trust_proxy:
-            xff = self.headers.get("X-Forwarded-For", "")
+            # The right-most entry is the one our own proxy added; anything to its left came from the
+            # client and can be forged.
+            xff = [x.strip() for x in self.headers.get("X-Forwarded-For", "").split(",") if x.strip()]
             if xff:
-                return xff.split(",")[0].strip()
+                return xff[-1]
         return self.client_address[0]
+
+    def cors_headers(self) -> dict:
+        origin = self.headers.get("Origin", "")
+        if "*" in Config.cors:
+            return {"Access-Control-Allow-Origin": "*"}
+        if origin and origin in Config.cors:
+            return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+        return {}
+
+    def guard(self, path: str) -> bool:
+        """Host allowlist and optional token. Sends the refusal and returns False when the request is refused.
+        /healthz is exempt from both so container and load-balancer health checks work; it reveals only the version."""
+        if path == "/healthz":
+            return True
+        if Config.hosts is not None and host_name(self.headers.get("Host", "")) not in Config.hosts:
+            self.send(421, b"This StackCheck does not answer for that host name. "
+                           b"Set STACKCHECK_ALLOWED_HOSTS to allow it.\n", "text/plain; charset=utf-8")
+            return False
+        if Config.token:
+            supplied = token_from(self.headers.get("Authorization", ""))
+            if not hmac.compare_digest(supplied.encode(), Config.token.encode()):
+                self.send(401, b"This StackCheck needs a token.\n", "text/plain; charset=utf-8",
+                          {"WWW-Authenticate": 'Basic realm="StackCheck", charset="UTF-8"'})
+                return False
+        return True
 
     def send(self, status, body: bytes, ctype: str, extra: dict | None = None):
         self.send_response(status)
@@ -1488,8 +1625,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, status, obj):
         body = json.dumps(obj, indent=2, ensure_ascii=False).encode()
-        self.send(status, body, "application/json; charset=utf-8",
-                  {"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
+        self.send(status, body, "application/json; charset=utf-8", {"Cache-Control": "no-store", **self.cors_headers()})
 
     def wants_json(self, query) -> bool:
         if query.get("format", [""])[0] == "json":
@@ -1501,10 +1637,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def do_OPTIONS(self):  # CORS preflight, e.g. for API calls that send an Authorization header
+        cors = self.cors_headers()
+        if not cors or Config.hosts is not None and host_name(self.headers.get("Host", "")) not in Config.hosts:
+            return self.send(403, b"", "text/plain")
+        self.send(204, b"", "text/plain", {**cors, "Access-Control-Allow-Methods": "GET, HEAD",
+                                            "Access-Control-Allow-Headers": "Authorization",
+                                            "Access-Control-Max-Age": "600"})
+
     def do_GET(self):
         parts = urllib.parse.urlsplit(self.path)
         path = parts.path
         query = urllib.parse.parse_qs(parts.query)
+        if not self.guard(path):
+            return
         try:
             if path == "/" and "d" in query:
                 target = normalize_domain(query["d"][0])
@@ -1543,6 +1689,36 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(500, {"error": "Internal error while scanning."})
 
 
+class Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on open connections; past it, new ones get a 503 straight away."""
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.slots = threading.BoundedSemaphore(max(1, Config.max_connections))
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 # --------------------------------------------------------------------------- CLI
 
 def main(argv=None):
@@ -1569,8 +1745,18 @@ def main(argv=None):
             return 1
         return 0
 
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    srv.daemon_threads = True
+    if Config.allow_private and not is_loopback(a.host) and not Config.token:
+        p.error("--allow-private on a network address would let anyone who can reach this server scan your "
+                "internal network. Listen on 127.0.0.1, or set STACKCHECK_TOKEN as well.")
+    Config.hosts = effective_allowed_hosts(a.host, Config.allowed_hosts)
+    if Config.hosts is None and not Config.allowed_hosts:
+        print("warning: listening on a network address and answering any host name. Set "
+              "STACKCHECK_ALLOWED_HOSTS to the name(s) you serve it on.", file=sys.stderr)
+    if not is_loopback(a.host) and not Config.token:
+        print("warning: no STACKCHECK_TOKEN set, so anyone who can reach this server can run scans "
+              "from it.", file=sys.stderr)
+
+    srv = Server((a.host, a.port), Handler)
     shown = "localhost" if a.host in ("0.0.0.0", "::") else a.host
     print(f"StackCheck {__version__} - {len(fp.techs)} fingerprints loaded")
     print(f"Listening on http://{shown}:{a.port}   try  http://{shown}:{a.port}/github.com")

@@ -38,8 +38,13 @@ python3 stackcheck.py scan example.com
 
 ```bash
 docker build -t stackcheck .
-docker run -d --name stackcheck -p 8080:8080 --restart unless-stopped stackcheck
+docker run -d --name stackcheck -p 127.0.0.1:8080:8080 --restart unless-stopped \
+  -e STACKCHECK_ALLOWED_HOSTS=localhost,127.0.0.1 stackcheck
 ```
+
+The image listens on all interfaces inside the container, so publish the port on `127.0.0.1` (as above) unless
+you mean to expose it. Before putting it on a network, read [SECURITY.md](SECURITY.md) and set
+`STACKCHECK_TOKEN` and `STACKCHECK_ALLOWED_HOSTS`.
 
 ---
 
@@ -188,19 +193,31 @@ Set these with environment variables (or `--host`, `--port`, `--allow-private` a
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `STACKCHECK_HOST` | `0.0.0.0` | Bind address |
+| `STACKCHECK_HOST` | `127.0.0.1` | Bind address. Only this machine can connect; use `0.0.0.0` to listen on the network |
 | `STACKCHECK_PORT` | `8080` | Port |
-| `STACKCHECK_DNS` | `1.1.1.1,8.8.8.8` | DNS resolvers (comma-separated) |
+| `STACKCHECK_ALLOWED_HOSTS` | localhost names | Host names the server answers to, comma-separated (`*` for any). Defaults to `localhost`, `127.0.0.1` and `::1` when bound to loopback, and to any name (with a warning) on a network address |
+| `STACKCHECK_TOKEN` | *(none)* | If set, every request except `/healthz` needs it: `Authorization: Bearer <token>`, or HTTP Basic with any username and the token as the password (browsers prompt for it) |
+| `STACKCHECK_CORS` | *(none)* | Origins allowed to read the JSON API from another site, comma-separated (`*` for any). Off by default |
+| `STACKCHECK_TRUST_PROXY` | `false` | Use `X-Forwarded-For` (its right-most entry) for rate limiting. Turn on behind nginx or Caddy |
+| `STACKCHECK_RATE_LIMIT` | `30` | New scans per client IP per minute (0 = unlimited) |
+| `STACKCHECK_SITE_RATE_LIMIT` | `10` | New scans of one site per minute, counting all its subdomains (0 = unlimited) |
+| `STACKCHECK_REFRESH_COOLDOWN` | `60` | A `?refresh=1` within this many seconds of the last scan gets the cached report |
+| `STACKCHECK_MAX_SCANS` | `8` | Scans running at once; more wait briefly, then get a 503 |
+| `STACKCHECK_MAX_CONNECTIONS` | `64` | Open connections; more get an immediate 503 |
+| `STACKCHECK_CLIENT_TIMEOUT` | `20` | Seconds a client may take to send its request |
+| `STACKCHECK_DNS` | `1.1.1.1,8.8.8.8` | DNS resolvers (comma-separated), or `system` to use `/etc/resolv.conf` |
 | `STACKCHECK_DOH` | `https://cloudflare-dns.com/dns-query` | DNS-over-HTTPS fallback (empty string turns it off) |
+| `STACKCHECK_USER_AGENT` | browser-like, ending `StackCheck/<version> (+repo URL)` | User-Agent sent to scanned sites |
 | `STACKCHECK_TIMEOUT` | `10` | Seconds per network operation |
 | `STACKCHECK_CACHE_TTL` | `900` | Seconds to cache a report (0 turns caching off) |
-| `STACKCHECK_RATE_LIMIT` | `30` | New scans per client IP per minute (0 = unlimited) |
-| `STACKCHECK_TRUST_PROXY` | `false` | Use `X-Forwarded-For` for rate limiting (turn on behind nginx or Caddy) |
-| `STACKCHECK_ALLOW_PRIVATE` | `false` | Allow scanning private and internal IPs. **Only use this on a trusted LAN.** |
+| `STACKCHECK_ALLOW_PRIVATE` | `false` | Allow scanning private and internal IPs. Refused on a network address unless `STACKCHECK_TOKEN` is set. **Only use this on a trusted LAN.** |
 
 ---
 
 ## Running in production
+
+Run StackCheck on `127.0.0.1` behind a reverse proxy that handles HTTPS, and tell it the name it's served on.
+See [SECURITY.md](SECURITY.md) for what to lock down.
 
 ### Behind Caddy (automatic HTTPS)
 
@@ -236,6 +253,8 @@ After=network-online.target
 
 [Service]
 ExecStart=/usr/bin/python3 /opt/stackcheck/stackcheck.py --host 127.0.0.1 --port 8080 --trust-proxy
+Environment=STACKCHECK_ALLOWED_HOSTS=stackcheck.yourdomain.com
+# Environment=STACKCHECK_TOKEN=change-me      # for a private instance
 Restart=always
 User=nobody
 DynamicUser=yes
@@ -270,6 +289,12 @@ sudo systemctl enable --now stackcheck
   runtime through a tag manager can be missed. That is the trade-off for being lightweight.
 - The HTML report escapes everything taken from scanned sites, only turns `http:` and `https:` URLs into
   links, and is served with a CSP that allows no inline scripts.
+- **Server.** It listens on `127.0.0.1` and only answers localhost names unless configured otherwise, so a web
+  page can't use DNS rebinding to drive a StackCheck on your machine. The JSON API isn't readable from other
+  sites unless you set `STACKCHECK_CORS`. Connections, concurrent scans and scans per IP and per site are
+  limited, and slow clients are dropped.
+
+See [SECURITY.md](SECURITY.md) for the threat model, deployment checklist and how to report a vulnerability.
 
 ## Limitations and ideas
 

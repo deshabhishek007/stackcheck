@@ -1,7 +1,12 @@
 """Offline unit tests:  python3 -m unittest discover tests"""
+import base64
 import gzip
+import http.client
+import json
 import os
 import socket
+import threading
+import time
 import sys
 import unittest
 import zlib
@@ -301,3 +306,147 @@ class SecurityTests(unittest.TestCase):
                                return_value={"theme name": "Evil", "theme uri": "javascript:alert(1)"}):
             wp = sc.wordpress_details(http, sc.extract_html(html)["urls"], None, ("ex.com",))
         self.assertIsNone(wp["themes"][0]["uri"])
+
+
+class LimitTests(unittest.TestCase):
+    def setUp(self):
+        self.patches = [mock.patch.object(sc, "CACHE", sc.TTLCache()),
+                        mock.patch.object(sc, "LIMITER", sc.RateLimiter()),
+                        mock.patch.object(sc, "SITE_LIMITER", sc.RateLimiter(lambda: sc.Config.site_rate_limit)),
+                        mock.patch.object(sc, "scan", side_effect=lambda d: {"domain": d})]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def test_site_key(self):
+        self.assertEqual(sc.site_key("a.b.example.com"), "example.com")
+        self.assertEqual(sc.site_key("shop.example.co.uk"), "example.co.uk")
+        self.assertEqual(sc.site_key("example.com"), "example.com")
+
+    def test_refresh_cooldown_serves_cache(self):
+        self.assertFalse(sc.cached_scan("example.com", "1.1.1.1")["cached"])
+        self.assertTrue(sc.cached_scan("example.com", "1.1.1.1", refresh=True)["cached"])
+        with mock.patch.object(sc.Config, "refresh_cooldown", 0):
+            self.assertFalse(sc.cached_scan("example.com", "1.1.1.1", refresh=True)["cached"])
+
+    def test_subdomains_share_the_site_limit(self):
+        with mock.patch.object(sc.Config, "site_rate_limit", 3):
+            for i in range(3):
+                sc.cached_scan(f"a{i}.victim.org", f"10.0.0.{i}")
+            with self.assertRaises(sc.ScanError) as cm:
+                sc.cached_scan("a9.victim.org", "10.0.0.9")  # different IP, different subdomain
+            self.assertEqual(cm.exception.status, 429)
+            sc.cached_scan("other.org", "10.0.0.9")  # other sites are unaffected
+
+    def test_busy_when_all_scan_slots_are_taken(self):
+        slots = threading.BoundedSemaphore(1)
+        slots.acquire()
+        with mock.patch.object(sc, "scan_slots", return_value=slots), mock.patch.object(sc.Config, "timeout", 0.05):
+            with self.assertRaises(sc.ScanError) as cm:
+                sc.cached_scan("example.com", "1.1.1.1")
+        self.assertEqual(cm.exception.status, 503)
+
+
+class ServerTests(unittest.TestCase):
+    """Runs the real server on a random local port. Scans are mocked, so no network is used."""
+
+    def start(self, **config):
+        patches = [mock.patch.object(sc.Config, k, v) for k, v in config.items()]
+        patches.append(mock.patch.object(sc.Handler, "log_message", lambda *a: None))
+        patches.append(mock.patch.object(sc, "cached_scan",
+                                         side_effect=lambda d, ip, refresh=False: {"domain": d, "ip": ip}))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.srv = sc.Server(("127.0.0.1", 0), sc.Handler)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+
+    def get(self, path, headers=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("GET", path, headers=headers or {})
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+        return r, body
+
+    def test_host_allowlist(self):
+        self.start(hosts={"localhost", "127.0.0.1", "::1"})
+        r, _ = self.get("/example.com.json", {"Host": "attacker.example"})  # DNS rebinding: wrong Host header
+        self.assertEqual(r.status, 421)
+        r, _ = self.get("/example.com.json", {"Host": f"127.0.0.1:{self.port}"})
+        self.assertEqual(r.status, 200)
+        r, _ = self.get("/healthz", {"Host": "anything.example"})  # health checks work under any name
+        self.assertEqual(r.status, 200)
+
+    def test_token(self):
+        self.start(hosts=None, token="s3cret")
+        r, _ = self.get("/example.com.json")
+        self.assertEqual(r.status, 401)
+        self.assertIn("Basic", r.getheader("WWW-Authenticate"))
+        self.assertEqual(self.get("/example.com.json", {"Authorization": "Bearer wrong"})[0].status, 401)
+        self.assertEqual(self.get("/example.com.json", {"Authorization": "Bearer s3cret"})[0].status, 200)
+        basic = "Basic " + base64.b64encode(b"anyone:s3cret").decode()
+        self.assertEqual(self.get("/example.com.json", {"Authorization": basic})[0].status, 200)
+        self.assertEqual(self.get("/healthz")[0].status, 200)  # health checks need no token
+
+    def test_cors_is_opt_in(self):
+        self.start(hosts=None, cors=[])
+        r, _ = self.get("/api/example.com", {"Origin": "https://evil.example"})
+        self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
+        self.srv.shutdown()
+        self.start(hosts=None, cors=["https://ok.example"])
+        r, _ = self.get("/api/example.com", {"Origin": "https://ok.example"})
+        self.assertEqual(r.getheader("Access-Control-Allow-Origin"), "https://ok.example")
+        r, _ = self.get("/api/example.com", {"Origin": "https://evil.example"})
+        self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
+
+    def test_forwarded_for_uses_the_proxys_entry(self):
+        self.start(hosts=None, trust_proxy=True)
+        _, body = self.get("/api/example.com", {"X-Forwarded-For": "6.6.6.6, 203.0.113.9"})
+        self.assertEqual(json.loads(body)["ip"], "203.0.113.9")  # 6.6.6.6 was written by the client
+
+    def test_slow_clients_are_dropped(self):
+        with mock.patch.object(sc.Handler, "timeout", 0.3):
+            self.start(hosts=None)
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            s.sendall(b"GET /healthz HTTP/1.1\r\n")  # ...and never finishes the request
+            t = time.monotonic()
+            self.assertEqual(s.recv(100), b"")  # server closed the connection
+            self.assertLess(time.monotonic() - t, 3)
+            s.close()
+
+    def test_connection_cap(self):
+        self.start(hosts=None, max_connections=1)
+        idle = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        time.sleep(0.2)
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        self.assertTrue(s.recv(100).startswith(b"HTTP/1.1 503"))
+        s.close()
+        idle.close()
+
+
+class StartupTests(unittest.TestCase):
+    def test_allowed_hosts(self):
+        self.assertEqual(sc.effective_allowed_hosts("127.0.0.1", []), {"localhost", "127.0.0.1", "::1"})
+        self.assertIsNone(sc.effective_allowed_hosts("0.0.0.0", []))
+        self.assertEqual(sc.effective_allowed_hosts("0.0.0.0", ["Scan.Example.com"]), {"scan.example.com"})
+        self.assertIsNone(sc.effective_allowed_hosts("127.0.0.1", ["*"]))
+        self.assertEqual(sc.host_name("Example.com:8080"), "example.com")
+        self.assertEqual(sc.host_name("[::1]:8080"), "::1")
+
+    def test_token_parsing(self):
+        self.assertEqual(sc.token_from("Bearer abc"), "abc")
+        self.assertEqual(sc.token_from("Basic " + base64.b64encode(b"u:p:w").decode()), "p:w")
+        self.assertEqual(sc.token_from("Basic !!!"), "")
+        self.assertEqual(sc.token_from(""), "")
+
+    def test_allow_private_needs_loopback_or_token(self):
+        with mock.patch.object(sc.Config, "token", ""), mock.patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                sc.main(["--host", "0.0.0.0", "--allow-private"])
