@@ -6,7 +6,8 @@ Run it, then visit  http://localhost:8080/example.com  to see what powers exampl
 
   python3 stackcheck.py                    # serve on 127.0.0.1:8080
   python3 stackcheck.py --port 3000
-  python3 stackcheck.py scan example.com   # one-off scan, prints JSON
+  python3 stackcheck.py scan example.com   # one-off scan: a summary in a terminal, JSON when piped
+  python3 stackcheck.py scan example.com --json
 
 Pure Python standard library (3.9+). No pip install needed.
 License: MIT
@@ -28,6 +29,7 @@ import ssl
 import struct
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import urllib.error
@@ -72,13 +74,18 @@ def _system_resolvers() -> list[str]:
         return []
 
 
+def default_port() -> int:
+    """STACKCHECK_PORT, else PORT (set by Render, Railway, Fly, Heroku and similar hosts), else 8080."""
+    return int(os.environ.get("STACKCHECK_PORT") or os.environ.get("PORT") or 8080)
+
+
 def _split(value: str) -> list[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
 class Config:
     host = env("HOST", "127.0.0.1")           # 0.0.0.0 exposes it to the network (the Docker image sets that)
-    port = env("PORT", 8080)
+    port = default_port()
     dns_servers = (_system_resolvers() if env("DNS", "").strip().lower() == "system"
                    else _split(env("DNS", "1.1.1.1,8.8.8.8")))
     doh_url = env("DOH", "https://cloudflare-dns.com/dns-query")
@@ -1792,6 +1799,91 @@ class Server(ThreadingHTTPServer):
 
 # --------------------------------------------------------------------------- CLI
 
+def format_report(r: dict) -> str:
+    """A plain-text summary of a scan for the terminal. The JSON (--json) has everything."""
+    out: list[str] = []
+    add = out.append
+    http, tls, dns = r.get("http") or {}, r.get("tls") or {}, r.get("dns") or {}
+    title = (r.get("summary") or {}).get("title")
+    add(r["domain"] + (f"  -  {title}" if title else ""))
+    facts = [http.get("final_url") or "no HTTP response"]
+    if http.get("status") is not None:
+        facts.append(f"HTTP {http['status']}")
+    if tls.get("protocol"):
+        cert = (f"certificate valid, {tls['days_left']} days left" if tls.get("valid") and tls.get("days_left") is not None
+                else "certificate valid" if tls.get("valid") else f"certificate problem: {tls.get('error', 'unknown')}")
+        facts.append(f"{tls['protocol'].replace('TLSv', 'TLS ')}, {cert}")
+    facts.append(f"scanned in {r.get('duration_ms', 0) / 1000:.1f} s")
+    add("  ".join(f"{f}  ·" for f in facts[:-1]) + "  " + facts[-1])
+
+    b = r.get("blocked")
+    if b:
+        add("")
+        add(f"! Blocked by {b['by'] or 'the site firewall'} ({b['kind']}, HTTP {b['status']}). Page-based results are "
+            "missing; DNS, TLS, hosting and CDN results are reliable.")
+
+    techs = r.get("technologies") or []
+    add("")
+    add(f"Technologies ({len(techs)})")
+    if not techs:
+        add("  none detected")
+    width = max([len(t["category"]) for t in techs] + [10])
+    for t in sorted(techs, key=lambda t: (t["category"], -t["confidence"], t["name"].lower())):
+        name = t["name"] + (f" {t['version']}" if t.get("version") else "")
+        low = "  (low confidence)" if t["level"] == "low" else ""
+        add(f"  {t['category']:<{width}}  {name:<34} {t['confidence']:>3}%{low}")
+
+    wp = r.get("wordpress")
+    if wp:
+        add("")
+        add("WordPress")
+        themes = wp.get("themes", [])
+        by_slug = {t["slug"]: t["name"] for t in themes}
+        for t in themes:
+            ver = f" {t['version']}" if t.get("version") else ""
+            role = (f" (child of {by_slug.get(t['parent'], t['parent'])})" if t.get("parent")
+                    else " (parent theme)" if t.get("role") == "parent theme" else "")
+            add(f"  Theme     {t['name']}{ver}{role}")
+        plugins = wp.get("plugins", [])
+        names = ", ".join(p["name"] + (f" {p['version']}" if p.get("version") else "") for p in plugins)
+        add(textwrap.fill(f"{len(plugins)}" + (f": {names}" if names else ""), width=100,
+                          initial_indent="  Plugins   ", subsequent_indent=" " * 12))
+        rest = wp.get("rest") or {}
+        content = wp.get("content") or {}
+        from_sitemap = {c["source"] for c in content.values()} == {"sitemap"}
+        counts = ", ".join(f"{c['count']:,}{'+' if c['partial'] else ''} {k}"
+                           + (" (sitemap)" if c["source"] == "sitemap" and not from_sitemap else "")
+                           for k, c in content.items())
+        if counts and from_sitemap:
+            counts += " (counted from the sitemap)"
+        add(f"  REST API  {rest.get('status', 'unknown')}")
+        if counts:
+            add(f"  Content   {counts}")
+        if rest.get("users_public"):
+            add("  Users     the user list is public (usernames exposed)")
+
+    sm = r.get("sitemap")
+    if sm is not None:
+        add("")
+        if sm.get("found"):
+            n = f"{'at least ' if sm.get('partial') else ''}{(sm.get('urls') or 0):,} URLs"
+            add(f"Sitemap     {sm['url']}  ({'listed in robots.txt' if sm.get('source') == 'robots.txt' else 'common path'}, {n})")
+        else:
+            add(f"Sitemap     not found{' (robots.txt exists)' if sm.get('robots_txt') else ''}")
+
+    add(f"DNS         NS {', '.join(dns.get('NS') or ['-'])}")
+    if dns.get("MX"):
+        add(f"            MX {', '.join(dns['MX'][:3])}{' ...' if len(dns['MX']) > 3 else ''}")
+    sec = r.get("security_headers")
+    if sec is not None:
+        missing = [h["header"] for h in sec if not h["present"]]
+        add(f"Security    {len(sec) - len(missing)}/{len(sec)} security headers"
+            + (f" (missing: {', '.join(missing)})" if missing else ""))
+    for e in r.get("errors") or []:
+        add(f"! {e}")
+    return "\n".join(out)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="StackCheck - self-hosted website technology scanner")
     p.add_argument("command", nargs="?", default="serve", choices=["serve", "scan"])
@@ -1802,6 +1894,8 @@ def main(argv=None):
                    help="allow scanning hosts on private networks (only for trusted, local use)")
     p.add_argument("--trust-proxy", action="store_true", default=Config.trust_proxy,
                    help="use X-Forwarded-For for rate limiting (when behind nginx/Caddy/etc.)")
+    p.add_argument("--json", action="store_true",
+                   help="scan: print the full JSON report (the default when output is piped)")
     a = p.parse_args(argv)
     Config.allow_private, Config.trust_proxy = a.allow_private, a.trust_proxy
     fp = fingerprints()
@@ -1810,10 +1904,15 @@ def main(argv=None):
         if not a.domain:
             p.error("scan needs a domain, e.g.  stackcheck.py scan example.com")
         try:
-            print(json.dumps(scan(a.domain), indent=2, ensure_ascii=False))
+            result = scan(a.domain)
         except ScanError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+        # Scripts piping the output keep getting JSON; a person at a terminal gets a summary.
+        if a.json or not sys.stdout.isatty():
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print(format_report(result))
         return 0
 
     if Config.allow_private and not is_loopback(a.host) and not Config.token:

@@ -1,5 +1,7 @@
 # StackCheck
 
+[![Tests](https://github.com/deshabhishek007/stackcheck/actions/workflows/test.yml/badge.svg)](https://github.com/deshabhishek007/stackcheck/actions/workflows/test.yml)
+
 A small, self-hosted website technology scanner, in the same spirit as BuiltWith or Wappalyzer.
 Put a domain after your StackCheck URL to see what that site runs on:
 
@@ -33,6 +35,29 @@ One-off scan from the terminal:
 ```bash
 python3 stackcheck.py scan example.com
 ```
+
+In a terminal this prints a summary:
+
+```
+generatepress.com  -  GeneratePress - The perfect foundation for your WordPress website.
+https://generatepress.com/  ·  HTTP 200  ·  TLS 1.3, certificate valid, 63 days left  ·  scanned in 2.5 s
+
+Technologies (21)
+  CDN                 Cloudflare                         100%
+  CMS                 WordPress 7.1.2                    100%
+  ...
+
+WordPress
+  Theme     GeneratePress Official 0.1 (child of GeneratePress)
+  Theme     GeneratePress 3.6.1 (parent theme)
+  Plugins   9: Affiliate WP 1.4.0, Easy Digital Downloads 3.6.9.1, ...
+  REST API  restricted
+  Content   288 posts, 42 pages, 6 categories (counted from the sitemap)
+
+Sitemap     https://generatepress.com/wp-sitemap.xml  (listed in robots.txt, 336 URLs)
+```
+
+Add `--json` for the full report. When the output is piped (`| jq`, `> report.json`), it's JSON automatically.
 
 ### Docker
 
@@ -195,7 +220,7 @@ Set these with environment variables (or `--host`, `--port`, `--allow-private` a
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `STACKCHECK_HOST` | `127.0.0.1` | Bind address. Only this machine can connect; use `0.0.0.0` to listen on the network |
-| `STACKCHECK_PORT` | `8080` | Port |
+| `STACKCHECK_PORT` | `8080` | Port. If unset, the `PORT` variable that Render, Railway, Fly and similar hosts provide is used |
 | `STACKCHECK_ALLOWED_HOSTS` | localhost names | Host names the server answers to, comma-separated (`*` for any). Defaults to `localhost`, `127.0.0.1` and `::1` when bound to loopback, and to any name (with a warning) on a network address |
 | `STACKCHECK_TOKEN` | *(none)* | If set, every request except `/healthz` needs it: `Authorization: Bearer <token>`, or HTTP Basic with any username and the token as the password (browsers prompt for it) |
 | `STACKCHECK_CORS` | *(none)* | Origins allowed to read the JSON API from another site, comma-separated (`*` for any). Off by default |

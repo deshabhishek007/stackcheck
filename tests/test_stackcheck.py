@@ -2,6 +2,7 @@
 import base64
 import gzip
 import http.client
+import io
 import json
 import os
 import socket
@@ -502,3 +503,63 @@ class BlockPageTests(unittest.TestCase):
         self.assertIsNone(r["security_headers"])
         self.assertIsNone(r["summary"]["title"])
         self.assertIsNone(r["wordpress"])
+
+
+class CLITests(unittest.TestCase):
+    REPORT = {
+        "domain": "ex.com", "summary": {"title": "Example"}, "duration_ms": 1234, "errors": [],
+        "http": {"final_url": "https://ex.com/", "status": 200},
+        "tls": {"protocol": "TLSv1.3", "valid": True, "days_left": 40},
+        "dns": {"NS": ["a.ns.example"], "MX": []},
+        "technologies": [{"name": "WordPress", "category": "CMS", "version": "6.6", "confidence": 100, "level": "high"},
+                         {"name": "core-js", "category": "JavaScript Library", "version": None, "confidence": 40,
+                          "level": "low"}],
+        "blocked": None,
+        "wordpress": {"themes": [{"slug": "kid", "name": "Kid", "version": "1.0", "parent": "astra",
+                                  "role": "child theme"},
+                                 {"slug": "astra", "name": "Astra", "version": "4.0", "role": "parent theme"}],
+                      "plugins": [{"name": "Yoast SEO", "version": "22.6"}],
+                      "rest": {"status": "restricted"},
+                      "content": {"posts": {"count": 288, "source": "sitemap", "partial": False}}},
+        "sitemap": {"found": True, "url": "https://ex.com/wp-sitemap.xml", "source": "robots.txt", "urls": 300,
+                    "partial": False},
+        "security_headers": [{"header": "HSTS", "present": True}, {"header": "X-Frame-Options", "present": False}],
+    }
+
+    def test_summary(self):
+        text = sc.format_report(self.REPORT)
+        for want in ["ex.com  -  Example", "HTTP 200", "TLS 1.3, certificate valid, 40 days left",
+                     "WordPress 6.6", "(low confidence)", "Kid 1.0 (child of Astra)", "Astra 4.0 (parent theme)",
+                     "1: Yoast SEO 22.6", "288 posts (counted from the sitemap)", "300 URLs",
+                     "1/2 security headers (missing: X-Frame-Options)"]:
+            self.assertIn(want, text)
+
+    def test_blocked_summary(self):
+        r = {**self.REPORT, "blocked": {"by": "Cloudflare", "kind": "challenge", "status": 403},
+             "wordpress": None, "security_headers": None}
+        text = sc.format_report(r)
+        self.assertIn("Blocked by Cloudflare (challenge, HTTP 403)", text)
+        self.assertNotIn("security headers", text)
+
+    def run_main(self, argv, tty):
+        class Out(io.StringIO):
+            def isatty(self):
+                return tty
+        out = Out()
+        with mock.patch.object(sc, "scan", return_value=self.REPORT), mock.patch.object(sc.sys, "stdout", out):
+            self.assertEqual(sc.main(argv), 0)
+        return out.getvalue()
+
+    def test_json_when_piped_or_asked(self):
+        self.assertEqual(json.loads(self.run_main(["scan", "ex.com"], tty=False))["domain"], "ex.com")
+        self.assertEqual(json.loads(self.run_main(["scan", "ex.com", "--json"], tty=True))["domain"], "ex.com")
+        self.assertIn("Technologies (2)", self.run_main(["scan", "ex.com"], tty=True))
+
+    def test_port_from_platform(self):
+        with mock.patch.dict(os.environ, {"PORT": "10000"}, clear=False):
+            os.environ.pop("STACKCHECK_PORT", None)
+            self.assertEqual(sc.default_port(), 10000)
+            with mock.patch.dict(os.environ, {"STACKCHECK_PORT": "9000"}):
+                self.assertEqual(sc.default_port(), 9000)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(sc.default_port(), 8080)
