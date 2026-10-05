@@ -471,8 +471,17 @@ def _fetch_once(url: str, verify: bool) -> dict:
     return {
         "url": url, "final_url": final_url, "status": status, "verified": verify,
         "redirects": redirect.chain, "response_ms": elapsed,
-        "headers": hdrs, "cookies": cookies, "html": html,
+        "headers": hdrs, "cookies": cookies, "html": html, "truncated": len(raw) >= Config.max_body,
     }
+
+
+def _get(url: str, verify: bool = True) -> dict | None:
+    """Fetch a secondary URL (robots.txt, sitemap, REST API) on a public host. None on any failure."""
+    try:
+        assert_public(urllib.parse.urlsplit(url).hostname or "")
+        return _fetch_once(url, verify)
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- HTML extraction
@@ -686,7 +695,12 @@ WP_NAMES = {
     "stackable-ultimate-gutenberg-blocks": "Stackable", "really-simple-ssl": "Really Simple SSL",
     "wp-fastest-cache": "WP Fastest Cache", "siteorigin-panels": "Page Builder by SiteOrigin",
     "so-widgets-bundle": "SiteOrigin Widgets Bundle", "nextgen-gallery": "NextGEN Gallery",
-    "add-to-any": "AddToAny Share Buttons", "wp-google-maps": "WP Go Maps", "shortcodes-ultimate": "Shortcodes Ultimate",
+    "add-to-any": "AddToAny Share Buttons", "co-authors-plus": "Co-Authors Plus", "elasticpress": "ElasticPress",
+    "publish-to-apple-news": "Publish to Apple News", "wp-parsely": "Parse.ly", "jetpack-boost": "Jetpack Boost",
+    "suremails": "SureMails", "surerank": "SureRank", "suretriggers": "SureTriggers", "ninja-tables": "Ninja Tables",
+    "duplicate-post": "Yoast Duplicate Post", "two-factor": "Two-Factor", "code-snippets": "Code Snippets",
+    "mailpoet": "MailPoet", "wp-mail-smtp": "WP Mail SMTP", "updraftplus": "UpdraftPlus",
+    "better-wp-security": "Solid Security", "presto-player": "Presto Player", "spectra-pro": "Spectra Pro", "wp-google-maps": "WP Go Maps", "shortcodes-ultimate": "Shortcodes Ultimate",
 }
 _WP_WORDS = {"wp": "WP", "seo": "SEO", "woocommerce": "WooCommerce", "gdpr": "GDPR", "ssl": "SSL", "smtp": "SMTP",
              "ai": "AI", "css": "CSS", "js": "JS", "ui": "UI", "pro": "Pro", "cf7": "CF7", "edd": "EDD", "gp": "GP",
@@ -757,12 +771,8 @@ def wp_assets(html: str, urls: list[str], final_url: str, core_version: str | No
 
 
 def _theme_header(url: str, verify: bool) -> dict:
-    try:
-        assert_public(urllib.parse.urlsplit(url).hostname or "")
-        r = _fetch_once(url, verify)
-    except Exception:
-        return {}
-    return parse_theme_header(r["html"]) if r["status"] == 200 else {}
+    r = _get(url, verify)
+    return parse_theme_header(r["html"]) if r and r["status"] == 200 else {}
 
 
 def wordpress_details(http: dict, urls: list[str], core_version: str | None) -> dict:
@@ -770,7 +780,7 @@ def wordpress_details(http: dict, urls: list[str], core_version: str | None) -> 
     themes = wp["themes"]
 
     def apply_headers(items):
-        futs = [(t, _pool.submit(_theme_header, t["stylesheet"], http["verified"])) for t in items]
+        futs = [(t, _leaf_pool.submit(_theme_header, t["stylesheet"], http["verified"])) for t in items]
         for t, f in futs:
             h = f.result()
             if h:
@@ -801,6 +811,235 @@ def wordpress_details(http: dict, urls: list[str], core_version: str | None) -> 
     return wp
 
 
+# REST namespaces that belong to WordPress itself rather than a plugin.
+WP_REST_CORE = {"oembed", "wp", "wp-site-health", "wp-block-editor", "wp-abilities", "batch"}
+# Namespace (first segment) -> plugin slug, where the two differ or the namespace is generic.
+WP_REST_PLUGINS = {
+    "yoast": "wordpress-seo", "wc": "woocommerce", "wc-analytics": "woocommerce", "wc-admin": "woocommerce",
+    "wc-telemetry": "woocommerce", "contact-form-7": "contact-form-7", "elementor": "elementor",
+    "elementor-pro": "elementor-pro", "jetpack": "jetpack", "my-jetpack": "jetpack", "wpcom": "jetpack",
+    "jetpack-boost": "jetpack-boost", "akismet": "akismet", "redirection": "redirection",
+    "rankmath": "seo-by-rank-math", "aioseo": "all-in-one-seo-pack", "wordfence": "wordfence", "wpforms": "wpforms",
+    "gf": "gravityforms", "litespeed": "litespeed-cache", "google-site-kit": "google-site-kit",
+    "code-snippets": "code-snippets", "duplicate-post": "duplicate-post", "two-factor": "two-factor",
+    "fluentform": "fluentform", "tribe": "the-events-calendar", "buddypress": "buddypress",
+    "wp-parsely": "wp-parsely", "coauthors": "co-authors-plus", "apple-news": "publish-to-apple-news",
+    "elasticpress": "elasticpress", "simple-page-ordering": "simple-page-ordering", "presto-player": "presto-player",
+    "sureforms": "sureforms", "sureforms-pro": "sureforms-pro", "spectra": "ultimate-addons-for-gutenberg",
+    "uag": "ultimate-addons-for-gutenberg", "spectra-pro": "spectra-pro", "surecookie": "surecookie",
+    "suremails": "suremails", "sure-triggers": "suretriggers", "surerank": "surerank", "ninjatables": "ninja-tables",
+    "astra-addon": "astra-addon", "wpml": "sitepress-multilingual-cms", "complianz": "complianz-gdpr",
+    "mailpoet": "mailpoet", "wp-mail-smtp": "wp-mail-smtp", "monsterinsights": "google-analytics-for-wordpress",
+    "updraftplus": "updraftplus", "wp-statistics": "wp-statistics", "ithemes-security": "better-wp-security",
+    "solid-security": "better-wp-security", "generateblocks": "generateblocks", "kadence-blocks": "kadence-blocks",
+    "ninja-forms": "ninja-forms", "formidable": "formidable", "wpcode": "insert-headers-and-footers",
+    "complianz-gdpr": "complianz-gdpr", "cookieyes": "cookie-law-info", "tablepress": "tablepress",
+    "wp-rocket": "wp-rocket", "sg-cachepress": "sg-cachepress", "siteground-optimizer": "sg-cachepress",
+}
+WP_REST_COUNTS = [("posts", "wp/v2/posts"), ("pages", "wp/v2/pages"), ("categories", "wp/v2/categories"),
+                  ("tags", "wp/v2/tags"), ("users", "wp/v2/users")]
+
+
+def wp_rest_root(http: dict) -> str:
+    """The REST API root the site advertises (Link header or <link rel>), else /wp-json/ on the final origin."""
+    m = re.search(r'<([^>]+)>\s*;\s*rel="https://api\.w\.org/"', http["headers"].get("link", ""))
+    if m:
+        return urllib.parse.urljoin(http["final_url"], m.group(1))
+    for tag in re.findall(r"<link\b[^>]*>", http["html"][:600_000], re.I):
+        a = _attrs(tag)
+        if a.get("rel") == "https://api.w.org/" and a.get("href"):
+            return urllib.parse.urljoin(http["final_url"], html_lib.unescape(a["href"]))
+    return urllib.parse.urljoin(http["final_url"], "/wp-json/")
+
+
+def wp_rest_url(root: str, route: str, **params) -> str:
+    """Build a REST URL for both pretty (/wp-json/) and plain (?rest_route=/) permalinks."""
+    if "rest_route=" in root:
+        sp = urllib.parse.urlsplit(root)
+        q = dict(urllib.parse.parse_qsl(sp.query))
+        q["rest_route"] = "/" + route
+        q.update(params)
+        return urllib.parse.urlunsplit(sp._replace(query=urllib.parse.urlencode(q)))
+    return root.rstrip("/") + "/" + route + ("?" + urllib.parse.urlencode(params) if params else "")
+
+
+def wp_rest_info(http: dict) -> dict:
+    """What the public REST API reveals: status, site settings, namespaces and content counts.
+    The users endpoint is only checked for being public and counted; usernames are never requested."""
+    root = wp_rest_root(http)
+    fields = "name,description,timezone_string,gmt_offset,namespaces,authentication,show_on_front"
+    urls = {"index": wp_rest_url(root, "", _fields=fields)}
+    urls.update({key: wp_rest_url(root, route, per_page=1, _fields="id") for key, route in WP_REST_COUNTS})
+    futs = {k: _leaf_pool.submit(_get, u, http["verified"]) for k, u in urls.items()}
+    res = {k: f.result() for k, f in futs.items()}
+
+    idx = res["index"]
+    data = None
+    if idx and idx["status"] == 200:
+        try:
+            data = json.loads(idx["html"])
+        except ValueError:
+            pass
+    if isinstance(data, dict) and "namespaces" in data:
+        status = "open"
+    elif idx and idx["status"] in (401, 403):
+        status = "restricted"
+    elif idx:
+        status = "unavailable"
+    else:
+        status = "unreachable"
+    data = data if isinstance(data, dict) else {}
+
+    counts = {}
+    for key, _ in WP_REST_COUNTS:
+        r = res[key]
+        total = r and r["status"] == 200 and r["headers"].get("x-wp-total", "")
+        if total and total.isdigit():
+            counts[key] = int(total)
+    users = res["users"]
+    users_public = None if not users else users["status"] == 200 and users["html"].lstrip().startswith("[")
+
+    return {
+        "url": root, "status": status, "http_status": idx["status"] if idx else None,
+        "name": html_lib.unescape(data.get("name") or "") or None,
+        "description": html_lib.unescape(data.get("description") or "") or None,
+        "timezone": data.get("timezone_string") or (f"UTC{data['gmt_offset']:+g}" if isinstance(
+            data.get("gmt_offset"), (int, float)) else None),
+        "show_on_front": data.get("show_on_front"),
+        "namespaces": [n for n in data.get("namespaces", []) if isinstance(n, str)],
+        "authentication": sorted(data.get("authentication") or {}) if isinstance(data.get("authentication"), dict) else [],
+        "users_public": users_public,
+        "counts": counts,
+    }
+
+
+def merge_rest_plugins(wp: dict) -> None:
+    """Add plugins revealed only by REST namespaces; add the namespace as evidence to ones already found."""
+    plugins = {p["slug"]: p for p in wp["plugins"]}
+    theme_slugs = {t["slug"] for t in wp["themes"]}
+    other = []
+    for ns in wp["rest"]["namespaces"]:
+        base = ns.split("/", 1)[0]
+        if base in WP_REST_CORE:
+            continue
+        slug = WP_REST_PLUGINS.get(base) or (base if base in plugins else None)
+        if not slug:
+            if base not in theme_slugs and base not in other:
+                other.append(base)
+            continue
+        p = plugins.get(slug)
+        if not p:
+            p = plugins[slug] = {"slug": slug, "name": wp_name(slug), "version": None, "mu": False, "assets": 0,
+                                 "evidence": []}
+        ev = f"REST API namespace {ns}"
+        if not any(e.startswith("REST API namespace " + base) for e in p["evidence"]) and len(p["evidence"]) < 5:
+            p["evidence"].append(ev)
+    wp["plugins"] = sorted(plugins.values(), key=lambda p: p["name"].lower())
+    wp["rest"]["other_namespaces"] = other
+
+
+# --------------------------------------------------------------------------- sitemap
+
+SITEMAP_GUESSES = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"]
+SITEMAP_MAX_CHILDREN = 12
+SITEMAP_GENERATORS = [
+    ("Yoast SEO", re.compile(r"generated by Yoast|yoast", re.I)),
+    ("Rank Math", re.compile(r"Rank ?Math", re.I)),
+    ("All in One SEO", re.compile(r"aioseo|All in One SEO", re.I)),
+    ("Jetpack", re.compile(r"jetpack", re.I)),
+    ("WordPress", re.compile(r"wp-sitemap", re.I)),
+]
+
+
+def parse_sitemap(xml: str) -> dict:
+    head = xml[:5000]
+    kind = ("index" if re.search(r"<sitemapindex[\s>]", head, re.I)
+            else "urlset" if re.search(r"<urlset[\s>]", head, re.I) else None)
+    locs = [html_lib.unescape(x.strip()) for x in re.findall(r"<loc>\s*(.*?)\s*</loc>", xml, re.I | re.S)]
+    return {"kind": kind, "locs": locs, "urls": len(re.findall(r"<url[\s>]", xml, re.I))}
+
+
+def sitemap_type(url: str) -> str | None:
+    """Content type from a child sitemap's file name: wp-sitemap-posts-post-1.xml, page-sitemap.xml, sitemap-page-1.xml."""
+    name = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1].lower()
+    m = (re.match(r"wp-sitemap-(?:posts|taxonomies)-([a-z0-9_-]+?)-\d+\.xml$", name)
+         or re.match(r"wp-sitemap-(users)-\d+\.xml$", name)
+         or re.match(r"([a-z0-9_-]+?)[-_]sitemap(?:[-_]?\d+)?\.xml$", name))
+    if not m and (m := re.match(r"sitemap[-_]([a-z0-9_-]+?)([-_]\d+)?\.xml$", name)):
+        if m.group(1) == "page" and m.group(2):
+            return None  # sitemap-page-3.xml is usually pagination, not WordPress pages
+    t = m.group(1) if m else None
+    if t:
+        t = re.sub(r"^(?:post-type|taxonomy-type|taxonomy|posttype)-", "", t)  # SureRank-style names
+    return None if not t or re.fullmatch(r"[\d_-]+", t) else t
+
+
+def _count_sitemap(url: str, verify: bool) -> dict:
+    r = _get(url, verify)
+    sm = parse_sitemap(r["html"]) if r and r["status"] == 200 else None
+    return {"url": url, "type": sitemap_type(url), "urls": sm["urls"] if sm and sm["kind"] == "urlset" else None,
+            "truncated": bool(r and r.get("truncated"))}
+
+
+def sitemap_info(final_url: str, verify: bool) -> dict:
+    origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(final_url))
+    guesses = [origin + p for p in SITEMAP_GUESSES]
+    f_robots = _leaf_pool.submit(_get, origin + "/robots.txt", verify)
+    f_guess = {u: _leaf_pool.submit(_get, u, verify) for u in guesses}
+
+    robots = f_robots.result()
+    robots_ok = bool(robots and robots["status"] == 200
+                     and "html" not in robots["headers"].get("content-type", "").lower())
+    declared = []
+    if robots_ok:
+        declared = list(dict.fromkeys(re.findall(r"(?im)^\s*sitemap\s*:\s*(\S+)", robots["html"])))[:10]
+
+    out = {"found": False, "robots_txt": robots_ok, "declared": declared, "url": None, "source": None,
+           "kind": None, "generator": None, "urls": None, "partial": False, "sitemaps": [], "children": 0,
+           "by_type": {}}
+    for url, source in [(u, "robots.txt") for u in declared] + [(u, "guessed") for u in guesses]:
+        r = f_guess[url].result() if url in f_guess else _get(url, verify)
+        if not r or r["status"] != 200:
+            continue
+        sm = parse_sitemap(r["html"])
+        if not sm["kind"]:
+            continue
+        gen = next((name for name, rx in SITEMAP_GENERATORS if rx.search(r["html"][:20000]) or rx.search(url)), None)
+        out.update(found=True, url=r["final_url"], source=source, kind=sm["kind"], generator=gen)
+        if sm["kind"] == "urlset":
+            out.update(urls=sm["urls"], partial=r["truncated"])
+        else:
+            children = list(dict.fromkeys(sm["locs"]))
+            counted = [f.result() for f in [_leaf_pool.submit(_count_sitemap, u, verify)
+                                            for u in children[:SITEMAP_MAX_CHILDREN]]]
+            out["children"] = len(children)
+            out["sitemaps"] = counted + [{"url": u, "type": sitemap_type(u), "urls": None, "truncated": False}
+                                         for u in children[SITEMAP_MAX_CHILDREN:100]]
+            out["urls"] = sum(c["urls"] or 0 for c in counted)
+            out["partial"] = len(children) > len(counted) or any(c["truncated"] or c["urls"] is None for c in counted)
+            for c in counted:
+                if c["type"] and c["urls"] is not None:
+                    out["by_type"][c["type"]] = out["by_type"].get(c["type"], 0) + c["urls"]
+        break
+    return out
+
+
+def wp_content(rest: dict, sitemap: dict | None) -> dict:
+    """Posts, pages, categories, tags and users: REST API totals first, sitemap URL counts as a fallback."""
+    by_type = (sitemap or {}).get("by_type", {})
+    aliases = {"posts": ["post"], "pages": ["page"], "categories": ["category"], "tags": ["post_tag", "tag"],
+               "users": ["users", "author"]}
+    out = {}
+    for key, names in aliases.items():
+        if key in rest["counts"]:
+            out[key] = {"count": rest["counts"][key], "source": "REST API", "partial": False}
+        elif any(n in by_type for n in names):
+            # Only sitemaps that were actually counted contribute, so a capped index gives a lower bound.
+            out[key] = {"count": sum(by_type.get(n, 0) for n in names), "source": "sitemap",
+                        "partial": bool(sitemap.get("partial"))}
+    return out
+
+
 # --------------------------------------------------------------------------- scan orchestration
 
 SECURITY_HEADERS = [
@@ -813,6 +1052,8 @@ SECURITY_HEADERS = [
 ]
 
 _pool = ThreadPoolExecutor(max_workers=32)
+# Single-request tasks only. Tasks running on _pool may wait on these without risking a deadlock.
+_leaf_pool = ThreadPoolExecutor(max_workers=32)
 
 
 def find_zone(host: str) -> tuple[str, list[str]]:
@@ -913,10 +1154,17 @@ def scan(domain: str) -> dict:
 
     techs = fingerprints().analyze(signals)
 
+    f_sitemap = _pool.submit(sitemap_info, http["final_url"], http["verified"]) if http else None
     wordpress = None
     wp_tech = next((t for t in techs if t["name"] == "WordPress"), None)
     if http and (wp_tech or "/wp-content/" in http["html"]):
+        f_rest = _pool.submit(wp_rest_info, http)
         wordpress = wordpress_details(http, page["urls"], wp_tech and wp_tech["version"])
+        wordpress["rest"] = f_rest.result()
+        merge_rest_plugins(wordpress)
+    sitemap = f_sitemap.result() if f_sitemap else None
+    if wordpress:
+        wordpress["content"] = wp_content(wordpress["rest"], sitemap)
 
     hdrs = signals["headers"]
     security = [{"header": label, "present": key in hdrs, "value": hdrs.get(key), "why": why}
@@ -934,6 +1182,7 @@ def scan(domain: str) -> dict:
         },
         "technologies": techs,
         "wordpress": wordpress,
+        "sitemap": sitemap,
         "http": None if not http else {
             "url": http["url"], "final_url": http["final_url"], "status": http["status"],
             "response_ms": http["response_ms"], "redirects": http["redirects"],

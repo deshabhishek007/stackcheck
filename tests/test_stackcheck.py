@@ -80,6 +80,33 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(self.fp.analyze({}), [])
 
 
+class SitemapTests(unittest.TestCase):
+    def test_parse(self):
+        idx = '<?xml version="1.0"?><sitemapindex xmlns="x"><sitemap><loc>https://ex.com/a.xml</loc></sitemap></sitemapindex>'
+        self.assertEqual(sc.parse_sitemap(idx)["kind"], "index")
+        self.assertEqual(sc.parse_sitemap(idx)["locs"], ["https://ex.com/a.xml"])
+        urlset = ('<urlset><url><loc>https://ex.com/1</loc><image:image><image:loc>i.jpg</image:loc></image:image>'
+                  '</url><url><loc>https://ex.com/2</loc></url></urlset>')
+        self.assertEqual((sc.parse_sitemap(urlset)["kind"], sc.parse_sitemap(urlset)["urls"]), ("urlset", 2))
+        self.assertIsNone(sc.parse_sitemap("<!DOCTYPE html><html>404</html>")["kind"])
+
+    def test_types(self):
+        cases = {
+            "https://ex.com/wp-sitemap-posts-post-1.xml": "post",
+            "https://ex.com/wp-sitemap-taxonomies-category-1.xml": "category",
+            "https://ex.com/wp-sitemap-users-1.xml": "users",
+            "https://ex.com/post-sitemap2.xml": "post",
+            "https://ex.com/post_tag-sitemap.xml": "post_tag",
+            "https://ex.com/post-type-page-sitemap-1.xml": "page",
+            "https://ex.com/sitemap-posts.xml": "posts",
+            "https://ex.com/sitemap-page-3.xml": None,  # pagination, not pages
+            "https://ex.com/sitemap-2024-01.xml": None,
+            "https://ex.com/sitemap.xml": None,
+        }
+        for url, want in cases.items():
+            self.assertEqual(sc.sitemap_type(url), want, url)
+
+
 class WordPressTests(unittest.TestCase):
     HTML = """
 <link rel='stylesheet' href='https://ex.com/wp-content/themes/astra-child/style.css?ver=6.6.1'>
@@ -110,6 +137,42 @@ class WordPressTests(unittest.TestCase):
         h = sc.parse_theme_header(css)
         self.assertEqual((h["theme name"], h["template"], h["version"]), ("Astra Child", "astra", "1.0.2"))
         self.assertEqual(sc.parse_theme_header("body{color:red}"), {})
+
+    def test_rest_url(self):
+        self.assertEqual(sc.wp_rest_url("https://ex.com/wp-json/", "wp/v2/posts", per_page=1),
+                         "https://ex.com/wp-json/wp/v2/posts?per_page=1")
+        self.assertEqual(sc.wp_rest_url("https://ex.com/?rest_route=/", "wp/v2/posts", per_page=1),
+                         "https://ex.com/?rest_route=%2Fwp%2Fv2%2Fposts&per_page=1")
+
+    def test_rest_root_from_link_header(self):
+        http = {"headers": {"link": '<https://ex.com/api/>; rel="https://api.w.org/"'}, "html": "",
+                "final_url": "https://ex.com/"}
+        self.assertEqual(sc.wp_rest_root(http), "https://ex.com/api/")
+        http = {"headers": {}, "html": "", "final_url": "https://ex.com/blog/"}
+        self.assertEqual(sc.wp_rest_root(http), "https://ex.com/wp-json/")
+
+    def test_merge_rest_plugins(self):
+        wp = {"themes": [{"slug": "astra"}],
+              "plugins": [{"slug": "elementor", "name": "Elementor", "version": "3.2", "mu": False, "assets": 4,
+                           "evidence": ["/wp-content/plugins/elementor/x.js"]}],
+              "rest": {"namespaces": ["oembed/1.0", "wp/v2", "elementor/v1", "elementor/v1/documents", "yoast/v1",
+                                      "astra/v1", "acme-thing/v2"]}}
+        sc.merge_rest_plugins(wp)
+        plugins = {p["slug"]: p for p in wp["plugins"]}
+        self.assertEqual(set(plugins), {"elementor", "wordpress-seo"})
+        self.assertEqual(plugins["elementor"]["evidence"][-1], "REST API namespace elementor/v1")
+        self.assertEqual(len(plugins["elementor"]["evidence"]), 2)  # one namespace entry per plugin
+        self.assertEqual(plugins["wordpress-seo"]["name"], "Yoast SEO")
+        self.assertEqual(wp["rest"]["other_namespaces"], ["acme-thing"])  # theme and core namespaces left out
+
+    def test_content_prefers_rest_then_sitemap(self):
+        rest = {"counts": {"posts": 682, "users": 3}}
+        sitemap = {"by_type": {"post": 600, "page": 42, "post_tag": 10}, "partial": True}
+        c = sc.wp_content(rest, sitemap)
+        self.assertEqual(c["posts"], {"count": 682, "source": "REST API", "partial": False})
+        self.assertEqual(c["pages"], {"count": 42, "source": "sitemap", "partial": True})
+        self.assertEqual(c["tags"]["count"], 10)
+        self.assertNotIn("categories", c)
 
     def test_not_wordpress(self):
         self.assertEqual(sc.wp_assets("<html></html>", [], "https://ex.com/"), {"themes": [], "plugins": []})

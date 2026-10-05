@@ -351,13 +351,39 @@ function wpPanel(wp) {
       </div>
     </details>`;
   };
+  const rest = wp.rest || {};
+  const LABEL = {posts: "Posts", pages: "Pages", categories: "Categories", tags: "Tags", users: "Users"};
+  const content = Object.entries(wp.content || {});
+  const contentPanel = `<div class="panel"><h3>Content</h3>${content.length
+    ? `<dl class="kv">${content.map(([k, c]) => `<dt>${esc(LABEL[k] || k)}</dt>
+        <dd><b>${c.partial ? "≥ " : ""}${c.count.toLocaleString()}</b> <span class="badge">${esc(c.source)}</span></dd>`).join("")}</dl>`
+    : `<div style="color:var(--muted);font-size:14px">Not available: the REST API is ${esc(rest.status || "unreachable")} and no sitemap lists posts or pages.</div>`}</div>`;
+  const STATUS = {open: ["ok", "Open"], restricted: ["no", "Restricted to logged-in users"],
+                  unavailable: ["no", "Disabled or not found"], unreachable: ["no", "Unreachable"]};
+  const [cls, label] = STATUS[rest.status] || ["no", rest.status || "–"];
+  const users = rest.users_public == null ? "–" : rest.users_public
+    ? `<span style="color:var(--bad)">Public${rest.counts?.users != null ? `: ${rest.counts.users.toLocaleString()} user${rest.counts.users === 1 ? "" : "s"}` : ""} (usernames exposed)</span>`
+    : `<span style="color:var(--good)">Not public</span>`;
+  const front = {posts: "Latest posts", page: "Static page"}[rest.show_on_front];
+  const restPanel = `<div class="panel"><h3>REST API</h3><dl class="kv">
+      <dt>Status</dt><dd><span style="color:var(--${cls === "ok" ? "good" : "bad"})">${esc(label)}</span>${rest.http_status ? ` <span class="badge">HTTP ${rest.http_status}</span>` : ""}</dd>
+      <dt>Endpoint</dt><dd>${lines([rest.url])}</dd>
+      ${rest.name ? `<dt>Site name</dt><dd>${lines([rest.name])}</dd>` : ""}
+      ${rest.description ? `<dt>Tagline</dt><dd>${lines([rest.description])}</dd>` : ""}
+      ${rest.timezone ? `<dt>Timezone</dt><dd>${lines([rest.timezone])}</dd>` : ""}
+      ${front ? `<dt>Front page</dt><dd>${lines([front])}</dd>` : ""}
+      ${(rest.authentication || []).length ? `<dt>Auth</dt><dd>${lines(rest.authentication)}</dd>` : ""}
+      <dt>User list</dt><dd>${users}</dd>
+      ${(rest.other_namespaces || []).length ? `<dt>Other APIs</dt><dd>${esc(rest.other_namespaces.join(", "))}</dd>` : ""}
+    </dl></div>`;
   const group = (title, items, kind, empty) => `<div class="cat"><h3><span>${title}</span><span>${items.length}</span></h3>
     ${items.length ? items.map(x => row(x, kind)).join("") : `<div class="tech" style="padding:10px 14px;color:var(--muted)">${empty}</div>`}</div>`;
-  return `<div class="cats">
+  return `<div class="grid2" style="margin-bottom:14px">${contentPanel}${restPanel}</div>
+    <div class="cats">
       ${group("Theme", wp.themes, "themes", "No theme files referenced on the homepage.")}
       ${group("Plugins", wp.plugins, "plugins", "No plugin files referenced on the homepage.")}
     </div>
-    <p class="note">Only themes and plugins that load files or leave markers on the homepage are visible from outside.
+    <p class="note">Plugins come from files and markers on the homepage, plus the namespaces the public REST API lists.
       Plugins that work only in the admin, on other pages, or are bundled into a combined file won't show up.
       Versions come from <code>?ver=</code> on asset URLs and the theme's <code>style.css</code>, so treat them as a guide.
       A wordpress.org link 404s for premium or custom plugins.</p>`;
@@ -396,6 +422,25 @@ function infraPanel(d) {
       <dt>DMARC</dt><dd>${lines(dns.DMARC)}</dd>
     </dl></div>
     <div class="panel"><h3>TXT records</h3><dl class="kv" style="grid-template-columns:1fr"><dd>${lines(dns.TXT)}</dd></dl></div>
+    ${sitemapPanel(d.sitemap)}
+  </div>`;
+}
+
+function sitemapPanel(s) {
+  if (!s) return "";
+  const count = c => c.urls == null ? "–" : (c.truncated ? "≥ " : "") + c.urls.toLocaleString();
+  const name = u => { try { return new URL(u).pathname; } catch { return u; } };
+  const counted = (s.sitemaps || []).filter(c => c.urls != null);
+  const rows = (s.sitemaps || []).slice(0, 12).map(c => `<tr><td>${esc(name(c.url))}</td><td>${esc(c.type || "")}</td><td>${count(c)}</td></tr>`).join("");
+  return `<div class="panel"><h3>Sitemap &amp; robots.txt${s.generator ? ` <span class="badge">${esc(s.generator)}</span>` : ""}</h3><dl class="kv">
+      <dt>robots.txt</dt><dd>${s.robots_txt ? '<span style="color:var(--good)">found</span>' : '<span style="color:var(--bad)">not found</span>'}</dd>
+      <dt>Sitemap</dt><dd>${s.found ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a><div style="color:var(--muted)">${s.source === "robots.txt" ? "listed in robots.txt" : "found at a common path (not in robots.txt)"}</div>`
+        : '<span style="color:var(--bad)">not found</span>'}</dd>
+      ${s.found ? `<dt>URLs</dt><dd><b>${s.partial ? "≥ " : ""}${(s.urls || 0).toLocaleString()}</b>${s.kind === "index" ? ` in ${counted.length} of ${s.children.toLocaleString()} sitemap${s.children === 1 ? "" : "s"}` : ""}</dd>` : ""}
+      ${(s.declared || []).length > 1 ? `<dt>Declared</dt><dd>${lines(s.declared)}</dd>` : ""}
+    </dl>
+    ${rows ? `<table class="headers" style="width:100%;border-collapse:collapse;margin-top:10px">${rows}</table>` : ""}
+    ${(s.sitemaps || []).length > 12 ? `<div class="note" style="margin-top:6px">+${(s.children - 12).toLocaleString()} more sitemaps not counted.</div>` : ""}
   </div>`;
 }
 

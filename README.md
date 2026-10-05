@@ -10,7 +10,8 @@ https://stackcheck.yourdomain.com/stripe.com
 The report covers **hosting, CDN, web server, CMS, ecommerce, frameworks, JS libraries, analytics, tag managers,
 marketing pixels, payment providers, live chat, cookie consent, DNS and email providers, SSL certificate and
 security headers**. Each detection shows the evidence it's based on and a confidence score.
-For WordPress sites it also lists the **theme and plugins** visible on the homepage.
+It also finds the site's **sitemap and robots.txt**. For WordPress sites it lists the **theme and plugins**,
+checks the **REST API**, and counts **posts, pages, categories and tags**.
 
 - **One Python file, no dependencies.** Needs only Python 3.9+ and the standard library.
 - **No third-party APIs.** It talks to the target site and a DNS resolver directly.
@@ -76,8 +77,13 @@ curl -s http://localhost:8080/shopify.com | jq '.technologies[] | {name, categor
   ],
   "wordpress": {   // null when the site isn't WordPress
     "themes":  [ { "slug": "astra-child", "name": "Astra Child", "version": "1.1.8", "role": "child theme", "parent": "astra" } ],
-    "plugins": [ { "slug": "wordpress-seo", "name": "Yoast SEO", "version": "22.6", "mu": false, "assets": 0, "evidence": ["..."] } ]
+    "plugins": [ { "slug": "wordpress-seo", "name": "Yoast SEO", "version": "22.6", "mu": false, "assets": 0, "evidence": ["..."] } ],
+    "rest":    { "status": "open", "url": ".../wp-json/", "name": "...", "timezone": "America/Los_Angeles",
+                 "namespaces": [], "other_namespaces": [], "users_public": false, "counts": { "posts": 682, "pages": 66 } },
+    "content": { "posts": { "count": 682, "source": "REST API", "partial": false } }
   },
+  "sitemap": { "found": true, "robots_txt": true, "url": ".../sitemap_index.xml", "source": "robots.txt", "kind": "index",
+               "generator": "Yoast SEO", "urls": 1718, "partial": false, "children": 12, "sitemaps": [], "by_type": { "post": 682 } },
   "http":  { "final_url": "...", "status": 200, "response_ms": 125, "redirects": [], "headers": {}, "cookies": [] },
   "tls":   { "valid": true, "issuer": "R11", "protocol": "TLSv1.3", "alpn": "h2", "days_left": 61 },
   "dns":   { "zone": "...", "A": [], "AAAA": [], "NS": [], "MX": [], "TXT": [], "CAA": [], "DMARC": [], "PTR": {}, "dnssec": false },
@@ -126,8 +132,26 @@ When a site looks like WordPress, StackCheck also lists its theme and plugins in
 - **The theme's `style.css`.** One extra request reads the theme header for its real name, version, author and
   parent. A child theme's parent is listed too, even when the page doesn't load it directly.
 
+- **REST API namespaces.** Most plugins register a namespace (`yoast/v1`, `wc/v3`, `elementor/v1`), which
+  reveals plugins that leave nothing on the homepage. Known namespaces are mapped to plugins; the rest are listed
+  as "Other APIs".
+
 Only what's visible from outside shows up. Plugins that run only in the admin or on other pages, or whose files
 are merged by an optimiser such as Autoptimize, won't be listed.
+
+The **REST API** panel shows whether `/wp-json/` is open, restricted to logged-in users or disabled, plus the site
+name, tagline, timezone and login methods it reports. It also checks whether `/wp/v2/users` lists users publicly
+(a common way to find login names). StackCheck only counts them and never requests or stores the usernames.
+
+The **Content** panel counts posts, pages, categories and tags from the REST API's `X-WP-Total` header. When the
+API is locked, it falls back to counting URLs in the matching sitemaps.
+
+### Sitemap and robots.txt
+
+For every site, StackCheck reads `robots.txt` for `Sitemap:` lines, then tries `/sitemap.xml`,
+`/sitemap_index.xml` and `/wp-sitemap.xml`. For a sitemap index it counts the URLs in the first 12 child
+sitemaps and groups them by type (post, page, category …) from the file names. Totals for larger indexes are
+marked as partial (`≥`).
 
 ### Adding a technology
 
