@@ -450,3 +450,55 @@ class StartupTests(unittest.TestCase):
         with mock.patch.object(sc.Config, "token", ""), mock.patch("sys.stderr"):
             with self.assertRaises(SystemExit):
                 sc.main(["--host", "0.0.0.0", "--allow-private"])
+
+
+class BlockPageTests(unittest.TestCase):
+    CF_CHALLENGE = {
+        "status": 403, "html": "<html><head><title>Just a moment...</title></head><body>"
+        "<script src='/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1'></script>"
+        "<script src='https://challenges.cloudflare.com/turnstile/v0/api.js'></script></body></html>",
+        "headers": {"server": "cloudflare", "cf-mitigated": "challenge", "cf-ray": "abc-MRS",
+                    "content-security-policy": "default-src 'none'", "x-frame-options": "SAMEORIGIN"},
+        "url": "https://ex.com/", "final_url": "https://ex.com/", "verified": True, "redirects": [],
+        "response_ms": 50, "cookies": [], "truncated": False,
+    }
+
+    def detect(self, status, html="", headers=None, title=None):
+        return sc.detect_block({"status": status, "html": html, "headers": headers or {}}, title)
+
+    def test_providers(self):
+        self.assertEqual(sc.detect_block(self.CF_CHALLENGE, "Just a moment...")["by"], "Cloudflare")
+        cf_block = self.detect(403, '<div id="cf-error-details">', {"server": "cloudflare"},
+                               "Attention Required! | Cloudflare")
+        self.assertEqual((cf_block["by"], cf_block["kind"]), ("Cloudflare", "block"))
+        self.assertEqual(self.detect(403, "Incapsula incident ID: 123")["by"], "Imperva")
+        self.assertEqual(self.detect(403, "", {"server": "Sucuri/Cloudproxy"})["by"], "Sucuri")
+        self.assertEqual(self.detect(403, "", {"server": "AkamaiGHost"}, "Access Denied")["by"], "Akamai")
+        self.assertEqual(self.detect(403, "", {"x-datadome": "protected"})["by"], "DataDome")
+        self.assertEqual(self.detect(200, "", {"x-amzn-waf-action": "captcha"})["by"], "AWS WAF")
+        generic = self.detect(503, "", {}, "Please verify you are a human")
+        self.assertEqual((generic["by"], generic["kind"]), (None, "challenge"))
+        self.assertEqual(self.detect(429)["kind"], "rate limit")
+
+    def test_normal_pages_are_not_flagged(self):
+        self.assertIsNone(self.detect(200, "<p>Just a moment, loading</p>", {"server": "cloudflare"}, "Just a moment"))
+        self.assertIsNone(self.detect(403, "<h1>Forbidden</h1>", {"server": "nginx"}, "403 Forbidden"))
+        self.assertIsNone(self.detect(404, "", {"server": "cloudflare"}, "Page not found"))
+
+    def test_scan_ignores_the_block_page(self):
+        dns = {"records": [], "cname": [], "ad": False}
+        with mock.patch.object(sc, "assert_public", return_value=["104.21.60.233"]), \
+                mock.patch.object(sc, "http_fetch", return_value=self.CF_CHALLENGE), \
+                mock.patch.object(sc, "tls_probe", return_value={"valid": True}), \
+                mock.patch.object(sc, "find_zone", return_value=("ex.com", ["ada.ns.cloudflare.com"])), \
+                mock.patch.object(sc, "dns_query", return_value=dns), \
+                mock.patch.object(sc, "sitemap_info", return_value={"found": False}):
+            r = sc.scan("ex.com")
+        names = {t["name"] for t in r["technologies"]}
+        self.assertEqual(r["blocked"]["by"], "Cloudflare")
+        self.assertIn("Cloudflare", names)                     # the CDN is real
+        self.assertNotIn("Content Security Policy", names)     # the challenge page's CSP isn't the site's
+        self.assertNotIn("Cloudflare Turnstile", names)        # nor is the challenge's own script
+        self.assertIsNone(r["security_headers"])
+        self.assertIsNone(r["summary"]["title"])
+        self.assertIsNone(r["wordpress"])

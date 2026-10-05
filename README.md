@@ -80,6 +80,7 @@ curl -s http://localhost:8080/shopify.com | jq '.technologies[] | {name, categor
       ]
     }
   ],
+  "blocked": null, // or { "by": "Cloudflare", "kind": "challenge", "status": 403, "evidence": "cf-mitigated: challenge" }
   "wordpress": {   // null when the site isn't WordPress
     "themes":  [ { "slug": "astra-child", "name": "Astra Child", "version": "1.1.8", "role": "child theme", "parent": "astra" } ],
     "plugins": [ { "slug": "wordpress-seo", "name": "Yoast SEO", "version": "22.6", "mu": false, "assets": 0, "evidence": ["..."] } ],
@@ -299,7 +300,10 @@ See [SECURITY.md](SECURITY.md) for the threat model, deployment checklist and ho
 ## Limitations and ideas
 
 - No headless browser, so client-side-only tags are invisible. A Playwright mode could be added as an option.
-- WAFs (Akamai, Cloudflare bot fight mode and others) may return 403 pages. The headers and DNS are still analysed.
+- Sites behind bot protection (Cloudflare, Imperva, Sucuri, Akamai, DataDome, AWS WAF and others) may serve a
+  challenge or block page instead of the homepage. StackCheck recognises these, says so at the top of the report
+  (and in `"blocked"` in the JSON), and ignores that page's content. DNS, TLS, hosting and CDN results are still
+  reliable. It doesn't try to get past bot protection.
 - Possible next steps: a scan history page, a diff between two scans, a bulk CSV endpoint, and IP→ASN lookup with an offline database.
 
 ## License

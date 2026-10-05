@@ -526,7 +526,12 @@ def http_fetch(host: str) -> dict:
             if scheme == "http" and not verify:
                 continue
             try:
-                return _fetch_once(f"{scheme}://{host}/", verify)
+                try:
+                    return _fetch_once(f"{scheme}://{host}/", verify)
+                except urllib.error.URLError as e:
+                    if not isinstance(e.reason, ConnectionResetError):
+                        raise
+                    return _fetch_once(f"{scheme}://{host}/", verify)  # some servers reset now and then; retry once
             except ScanError:
                 raise
             except urllib.error.URLError as e:
@@ -1226,6 +1231,64 @@ def wp_content(rest: dict, sitemap: dict | None) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- bot protection / block pages
+
+# Response headers that describe the page that was served. On a block page they describe the firewall's page,
+# not the site, so they're left out of detection and the security-header check.
+PAGE_HEADERS = {"content-security-policy", "content-security-policy-report-only", "x-frame-options",
+                "x-content-type-options", "referrer-policy", "permissions-policy", "cross-origin-opener-policy",
+                "cross-origin-embedder-policy", "cross-origin-resource-policy"}
+BLOCK_TITLE_RE = re.compile(r"just a moment|attention required|access denied|verify (?:you are|you're) (?:a )?human|"
+                            r"are you (?:a )?(?:robot|human)|captcha|ddos protection|security check|request blocked|"
+                            r"you have been blocked|bot (?:check|verification)", re.I)
+
+
+def detect_block(http: dict, title: str | None) -> dict | None:
+    """Recognise a bot challenge or firewall block page served instead of the homepage.
+    Returns {"by", "kind", "status", "evidence"} or None. StackCheck reports these; it never tries to get past them."""
+    st, h, title = http["status"], http["headers"], title or ""
+    html = http["html"][:200_000]
+    server = h.get("server", "").lower()
+
+    def found(by, kind, evidence):
+        return {"by": by, "kind": kind, "status": st, "evidence": evidence[:200]}
+
+    # Explicit headers: reliable whatever the status code.
+    if h.get("cf-mitigated", "").lower() == "challenge":
+        return found("Cloudflare", "challenge", "cf-mitigated: challenge")
+    if h.get("x-vercel-mitigated"):
+        return found("Vercel", "challenge", f"x-vercel-mitigated: {h['x-vercel-mitigated']}")
+    if h.get("x-amzn-waf-action"):
+        return found("AWS WAF", "challenge", f"x-amzn-waf-action: {h['x-amzn-waf-action']}")
+    if h.get("x-sucuri-block"):
+        return found("Sucuri", "block", f"x-sucuri-block: {h['x-sucuri-block']}")
+
+    # Page signatures: only on error statuses, so a normal page that mentions these words isn't flagged.
+    if st not in (401, 403, 405, 406, 429, 503):
+        return None
+    if "cloudflare" in server:
+        if "/cdn-cgi/challenge-platform/" in html or title.lower().startswith("just a moment"):
+            return found("Cloudflare", "challenge", f"title: {title}" if title else "Cloudflare challenge script")
+        if "cf-error-details" in html or "attention required" in title.lower():
+            return found("Cloudflare", "block", f"title: {title}" if title else "Cloudflare error page")
+    if "_Incapsula_Resource" in html or "Incapsula incident ID" in html:
+        return found("Imperva", "challenge" if "_Incapsula_Resource" in html else "block", "Incapsula page")
+    if "sucuri" in server or "Sucuri WebSite Firewall" in html:
+        return found("Sucuri", "block", f"server: {h.get('server', '')}")
+    if "akamaighost" in server and ("access denied" in title.lower() or "errors.edgesuite.net" in html):
+        return found("Akamai", "block", f"title: {title}")
+    if h.get("x-datadome") or "captcha-delivery.com" in html:
+        return found("DataDome", "challenge", "DataDome captcha")
+    if "px-captcha" in html or "perimeterx" in html.lower():
+        return found("HUMAN (PerimeterX)", "challenge", "PerimeterX captcha")
+    if BLOCK_TITLE_RE.search(title):
+        return found(None, "challenge" if re.search(r"moment|human|robot|captcha|check|verif", title, re.I)
+                     else "block", f"title: {title}")
+    if st == 429:
+        return found(None, "rate limit", "HTTP 429 Too Many Requests")
+    return None
+
+
 # --------------------------------------------------------------------------- scan orchestration
 
 SECURITY_HEADERS = [
@@ -1331,6 +1394,13 @@ def scan(domain: str) -> dict:
         "scanner": [],
     }
     page = extract_html(signals["html"]) if http else {"meta": {}, "urls": [], "title": None}
+    blocked = detect_block(http, page["title"]) if http else None
+    if blocked:
+        # The HTML and page headers belong to the firewall's page, so don't detect from them.
+        # Server, CDN and cookie headers still describe the site's real edge and stay.
+        page = {"meta": {}, "urls": [], "title": None}
+        signals["html"] = ""
+        signals["headers"] = {k: v for k, v in signals["headers"].items() if k not in PAGE_HEADERS}
     signals["meta"] = page["meta"]
     signals["urls"] = page["urls"]
     if tls.get("alpn") == "h2":
@@ -1344,7 +1414,7 @@ def scan(domain: str) -> dict:
     f_sitemap = _pool.submit(sitemap_info, http["final_url"], http["verified"], scope) if http else None
     wordpress = None
     wp_tech = next((t for t in techs if t["name"] == "WordPress"), None)
-    if http and (wp_tech or "/wp-content/" in http["html"]):
+    if http and not blocked and (wp_tech or "/wp-content/" in http["html"]):
         f_rest = _pool.submit(wp_rest_info, http, scope)
         wordpress = wordpress_details(http, page["urls"], wp_tech and wp_tech["version"], scope)
         wordpress["rest"] = f_rest.result()
@@ -1353,9 +1423,9 @@ def scan(domain: str) -> dict:
     if wordpress:
         wordpress["content"] = wp_content(wordpress["rest"], sitemap)
 
-    hdrs = signals["headers"]
-    security = [{"header": label, "present": key in hdrs, "value": hdrs.get(key), "why": why}
-                for key, label, why in SECURITY_HEADERS]
+    hdrs = http["headers"] if http else {}
+    security = None if blocked else [{"header": label, "present": key in hdrs, "value": hdrs.get(key), "why": why}
+                                     for key, label, why in SECURITY_HEADERS]
 
     result = {
         "domain": domain,
@@ -1368,6 +1438,7 @@ def scan(domain: str) -> dict:
             "categories": len({t["category"] for t in techs}),
         },
         "technologies": techs,
+        "blocked": blocked,
         "wordpress": wordpress,
         "sitemap": sitemap,
         "http": None if not http else {

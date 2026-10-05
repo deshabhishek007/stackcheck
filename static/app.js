@@ -82,13 +82,14 @@ function render(d) {
         <a class="btn" href="/${esc(d.domain)}.json" target="_blank">JSON</a>
       </div>
     </div>
+    ${blockedBanner(d.blocked)}
     <div class="stats">
       ${stat("Technologies", techs.length)}
       ${stat("HTTP status", http.status ?? "–")}
       ${stat("Response", http.response_ms != null ? http.response_ms + " ms" : "–")}
       ${stat("TLS", tls.protocol ? tls.protocol.replace("TLSv", "TLS ") : "none")}
       ${stat("Cert expires", days != null ? days + " days" : "–")}
-      ${stat("Security headers", secCount + " / " + (d.security_headers || []).length)}
+      ${stat("Security headers", d.security_headers ? secCount + " / " + d.security_headers.length : "–")}
       ${wp ? stat("WP plugins", wp.plugins.length) : ""}
     </div>
     <div class="tabs" role="tablist">
@@ -245,11 +246,11 @@ function infraPanel(d) {
       <dt>DMARC</dt><dd>${lines(dns.DMARC)}</dd>
     </dl></div>
     <div class="panel"><h3>TXT records</h3><dl class="kv" style="grid-template-columns:1fr"><dd>${lines(dns.TXT)}</dd></dl></div>
-    ${sitemapPanel(d.sitemap)}
+    ${sitemapPanel(d.sitemap, d.blocked)}
   </div>`;
 }
 
-function sitemapPanel(s) {
+function sitemapPanel(s, blocked) {
   if (!s) return "";
   const count = c => c.urls == null ? "–" : (c.truncated ? "≥ " : "") + c.urls.toLocaleString();
   const name = u => { try { return new URL(u).pathname; } catch { return u; } };
@@ -257,6 +258,7 @@ function sitemapPanel(s) {
   const rows = (s.sitemaps || []).slice(0, 12).map(c => `<tr><td>${esc(name(c.url))}</td><td>${esc(c.type || "")}</td><td>${count(c)}</td></tr>`).join("");
   return `<div class="panel"><h3>Sitemap &amp; robots.txt${s.generator ? ` <span class="badge">${esc(s.generator)}</span>` : ""}</h3><dl class="kv">
       <dt>robots.txt</dt><dd>${s.robots_txt ? '<span style="color:var(--good)">found</span>' : '<span style="color:var(--bad)">not found</span>'}</dd>
+      ${blocked && !s.found ? `<dt></dt><dd style="color:var(--muted)">May be hidden by the block page.</dd>` : ""}
       <dt>Sitemap</dt><dd>${s.found ? `${safeUrl(s.url) ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>` : esc(s.url)}<div style="color:var(--muted)">${s.source === "robots.txt" ? "listed in robots.txt" : "found at a common path (not in robots.txt)"}</div>`
         : '<span style="color:var(--bad)">not found</span>'}</dd>
       ${s.found ? `<dt>URLs</dt><dd><b>${s.partial ? "≥ " : ""}${(s.urls || 0).toLocaleString()}</b>${s.kind === "index" ? ` in ${counted.length} of ${s.children.toLocaleString()} sitemap${s.children === 1 ? "" : "s"}` : ""}</dd>` : ""}
@@ -265,6 +267,19 @@ function sitemapPanel(s) {
     </dl>
     ${rows ? `<table class="headers" style="width:100%;border-collapse:collapse;margin-top:10px">${rows}</table>` : ""}
     ${(s.sitemaps || []).length > 12 ? `<div class="note" style="margin-top:6px">+${(s.children - 12).toLocaleString()} more sitemaps not counted.</div>` : ""}
+  </div>`;
+}
+
+function blockedBanner(b) {
+  if (!b) return "";
+  const KIND = {challenge: "a bot check that needs a real browser", block: "an access-denied page", "rate limit": "a rate limit"};
+  const who = b.by ? esc(b.by) : "The site's firewall";
+  return `<div class="alert" role="status">
+    <b>${who} blocked this scan</b> with ${esc(KIND[b.kind] || b.kind)} (HTTP ${esc(b.status)}).
+    StackCheck saw that page instead of the homepage, so page-based results such as the CMS, frameworks,
+    analytics, WordPress and security headers are missing. DNS, TLS, hosting and CDN results are still reliable.
+    StackCheck doesn't try to get past bot protection.
+    <div class="ev">${esc(b.evidence)}</div>
   </div>`;
 }
 
@@ -282,7 +297,8 @@ function securityPanel(d) {
   const row = h => `<div class="check"><span class="dot ${h.present ? "ok" : "no"}">${h.present ? "✓" : "✕"}</span>
     <div><b>${esc(h.header)}</b><small>${esc(h.why)}</small>${h.value ? `<code>${esc(String(h.value).slice(0, 220))}</code>` : ""}</div></div>`;
   return `<div class="grid2">
-    <div class="panel"><h3>HTTP security headers</h3>${(d.security_headers || []).map(row).join("")}</div>
+    <div class="panel"><h3>HTTP security headers</h3>${d.security_headers ? d.security_headers.map(row).join("")
+      : `<div style="color:var(--muted);font-size:14px">Not checked: the headers came from a block page, not the site.</div>`}</div>
     <div class="panel"><h3>Transport & email</h3>${extra.map(row).join("")}</div>
   </div>`;
 }
