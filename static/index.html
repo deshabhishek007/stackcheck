@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackCheck</title>
+<meta name="description" content="See what any website is built with: hosting, CDN, CMS, frameworks, analytics, pixels, payments, DNS and SSL.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+:root{
+  --bg:#f7f7f9; --panel:#fff; --ink:#15161a; --muted:#6b6f7b; --line:#e6e7ec; --soft:#f1f2f6;
+  --accent:#4f46e5; --accent-soft:#eef0ff; --good:#0f8a5f; --good-soft:#e5f6ee; --warn:#b26a00; --warn-soft:#fff3dd;
+  --bad:#c0362c; --bad-soft:#fde9e7; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --radius:12px; color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0e0f12; --panel:#16181d; --ink:#ebecf0; --muted:#9a9fac; --line:#262932; --soft:#1d2027;
+  --accent:#8b85ff; --accent-soft:#23224a; --good:#4cc79a; --good-soft:#12302a; --warn:#f0b450; --warn-soft:#33270f;
+  --bad:#ff7a6e; --bad-soft:#3a1a18; color-scheme:dark;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+.wrap{max-width:1080px;margin:0 auto;padding:0 16px}
+header.top{display:flex;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:700;color:var(--ink);letter-spacing:-.01em}
+.brand:hover{text-decoration:none}
+.brand svg{width:24px;height:24px}
+form.search{flex:1;display:flex;max-width:520px;margin-left:auto}
+.search input{flex:1;min-width:0;padding:9px 12px;border:1px solid var(--line);border-right:0;border-radius:10px 0 0 10px;background:var(--panel);color:var(--ink);font:inherit;outline:none}
+.search input:focus{border-color:var(--accent)}
+.search button{padding:0 16px;border:0;border-radius:0 10px 10px 0;background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.search button:hover{filter:brightness(1.08)}
+
+/* home */
+.hero{padding:88px 0 40px;text-align:center}
+.hero h1{font-size:clamp(30px,5vw,46px);line-height:1.1;letter-spacing:-.03em;margin:0 0 12px}
+.hero p{color:var(--muted);font-size:17px;margin:0 auto 32px;max-width:560px}
+.bigsearch{display:flex;max-width:620px;margin:0 auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:6px;box-shadow:0 8px 30px rgba(20,20,40,.06)}
+.bigsearch:focus-within{border-color:var(--accent)}
+.bigsearch .prefix{display:flex;align-items:center;padding-left:12px;color:var(--muted);font-family:var(--mono);font-size:15px;white-space:nowrap}
+.bigsearch input{flex:1;min-width:0;border:0;background:transparent;color:var(--ink);font:16px var(--mono);padding:12px 6px;outline:none}
+.bigsearch button{border:0;border-radius:10px;background:var(--accent);color:#fff;font:inherit;font-weight:600;padding:0 22px;cursor:pointer}
+.examples{margin-top:18px;color:var(--muted);font-size:14px}
+.examples a{margin:0 6px;font-family:var(--mono)}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:56px 0 40px}
+.feature{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.feature b{display:block;margin-bottom:4px}
+.feature span{color:var(--muted);font-size:14px}
+
+/* report */
+.report{padding:28px 0 60px}
+.site{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.site .avatar{width:52px;height:52px;border-radius:12px;display:grid;place-items:center;font-weight:700;font-size:22px;color:#fff;flex:none}
+.site h2{margin:0;font-size:26px;letter-spacing:-.02em;overflow-wrap:anywhere}
+.site .title{color:var(--muted);margin-top:2px}
+.site .actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:9px;padding:7px 12px;font:inherit;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.btn:hover{border-color:var(--accent);text-decoration:none}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:22px 0}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
+.stat .k{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.stat .v{font-size:20px;font-weight:650;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:18px;overflow-x:auto}
+.tab{border:0;background:none;color:var(--muted);font:inherit;font-weight:600;padding:10px 12px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+.tab[aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent)}
+.filter{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.filter input:not([type=checkbox]){padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--ink);font:inherit;font-size:14px;min-width:200px;outline:none}
+.filter label{font-size:14px;color:var(--muted);display:flex;gap:6px;align-items:center;cursor:pointer}
+.cats{columns:2 380px;column-gap:14px}
+.cat{break-inside:avoid;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}
+.cat h3{margin:0;padding:11px 14px;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);border-bottom:1px solid var(--line);display:flex;justify-content:space-between}
+.tech{border-bottom:1px solid var(--line)}
+.tech:last-child{border-bottom:0}
+.tech summary{list-style:none;display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer}
+.tech summary::-webkit-details-marker{display:none}
+.tech summary:hover{background:var(--soft)}
+.ico{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font-size:13px;font-weight:700;color:#fff;flex:none}
+.tname{font-weight:600}
+.ver{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--soft);border-radius:5px;padding:1px 6px}
+.slug{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.tech summary .badge{margin-left:0;white-space:nowrap}
+.conf{margin-left:auto;font-size:12px;font-weight:600;border-radius:99px;padding:2px 9px;white-space:nowrap}
+.conf.high{background:var(--good-soft);color:var(--good)}
+.conf.medium{background:var(--warn-soft);color:var(--warn)}
+.conf.low{background:var(--soft);color:var(--muted)}
+.chev{color:var(--muted);transition:transform .15s;flex:none}
+.tech[open] .chev{transform:rotate(90deg)}
+.evidence{padding:2px 14px 12px 52px;font-size:13px}
+.evidence .row{display:flex;gap:8px;padding:3px 0;align-items:baseline}
+.evidence .src{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);width:62px;flex:none}
+.evidence code{font-family:var(--mono);font-size:12px;word-break:break-all;color:var(--ink)}
+.evidence .site-link{display:inline-block;margin-top:4px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+.panel h3{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+dl.kv{display:grid;grid-template-columns:110px 1fr;gap:6px 12px;margin:0;font-size:14px}
+dl.kv dt{color:var(--muted)}
+dl.kv dd{margin:0;font-family:var(--mono);font-size:13px;word-break:break-all}
+dl.kv dd div+div{margin-top:2px}
+.check{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line)}
+.check:last-child{border-bottom:0}
+.dot{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;flex:none;margin-top:1px}
+.dot.ok{background:var(--good-soft);color:var(--good)} .dot.no{background:var(--bad-soft);color:var(--bad)}
+.check small{display:block;color:var(--muted)}
+.check code{font-family:var(--mono);font-size:12px;color:var(--muted);word-break:break-all;display:block;margin-top:2px}
+pre.raw{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px;overflow:auto;font:12px/1.5 var(--mono);max-height:70vh}
+.headers td{padding:5px 10px 5px 0;vertical-align:top;font-size:13px;border-bottom:1px solid var(--line)}
+.headers td:first-child{color:var(--muted);white-space:nowrap;font-family:var(--mono);font-size:12px}
+.headers td:last-child{font-family:var(--mono);font-size:12px;word-break:break-all}
+.note{color:var(--muted);font-size:13px;margin-top:16px}
+.badge{display:inline-block;font-size:12px;border-radius:6px;padding:1px 7px;background:var(--soft);color:var(--muted);margin-left:6px;vertical-align:middle}
+
+/* loading / error */
+.loading{padding:70px 0;text-align:center}
+.spinner{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 18px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.steps{color:var(--muted);font-size:14px;min-height:22px}
+.error{margin:60px auto;max-width:520px;text-align:center}
+.error h2{margin:0 0 8px}
+.error p{color:var(--muted)}
+footer{border-top:1px solid var(--line);padding:20px 0 30px;color:var(--muted);font-size:13px}
+footer .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
+[hidden]{display:none!important}
+@media (max-width:560px){
+  header.top{flex-wrap:wrap} form.search{max-width:none;margin:0;flex-basis:100%}
+  .hero{padding-top:52px} .bigsearch .prefix{display:none}
+  dl.kv{grid-template-columns:90px 1fr}
+  .evidence{padding-left:14px}
+  .slug{display:none} .tech.wp .chev{margin-left:auto}
+  .site .actions{margin-left:0;flex-basis:100%}
+  .site h2{font-size:22px}
+}
+</style>
+</head>
+<body>
+<header class="wrap top">
+  <a class="brand" href="/"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#4f46e5"/><g fill="#fff"><rect x="7" y="8" width="18" height="4" rx="1.5"/><rect x="7" y="14" width="13" height="4" rx="1.5" opacity=".8"/><rect x="7" y="20" width="8" height="4" rx="1.5" opacity=".6"/></g></svg>StackCheck</a>
+  <form class="search" id="topSearch" hidden><input name="d" placeholder="example.com" autocomplete="off" spellcheck="false" aria-label="Domain"><button>Scan</button></form>
+</header>
+
+<main class="wrap">
+  <section id="home" hidden>
+    <div class="hero">
+      <h1>What is that website built with?</h1>
+      <p>Hosting, CDN, CMS, frameworks, analytics, marketing pixels, payments, DNS, SSL and security, with the evidence behind every detection.</p>
+      <form class="bigsearch" id="homeSearch">
+        <span class="prefix" id="hostPrefix"></span>
+        <input name="d" placeholder="example.com" autocomplete="off" spellcheck="false" autofocus aria-label="Domain">
+        <button>Scan</button>
+      </form>
+      <div class="examples">Try <a href="/github.com">github.com</a><a href="/shopify.com">shopify.com</a><a href="/wordpress.org">wordpress.org</a></div>
+    </div>
+    <div class="features">
+      <div class="feature"><b>Just change the URL</b><span>Visit <code id="urlHint"></code> and get a full report.</span></div>
+      <div class="feature"><b>Evidence for everything</b><span>Every detection shows the header, script, cookie or DNS record that gave it away.</span></div>
+      <div class="feature"><b>JSON API built in</b><span><code>curl</code> any report URL or add <code>.json</code> to get machine-readable output.</span></div>
+      <div class="feature"><b>Self-hosted</b><span>One Python file, no dependencies, no third-party APIs. Your scans stay yours.</span></div>
+    </div>
+  </section>
+
+  <section id="loading" class="loading" hidden>
+    <div class="spinner"></div>
+    <div><b id="loadingDomain"></b></div>
+    <div class="steps" id="steps">Resolving DNS…</div>
+  </section>
+
+  <section id="error" class="error" hidden>
+    <h2>Couldn't scan that</h2>
+    <p id="errorMsg"></p>
+    <a class="btn" href="/">← Back</a>
+  </section>
+
+  <section id="report" class="report" hidden></section>
+</main>
+
+<footer><div class="wrap"><span>StackCheck · open-source, self-hosted technology scanner</span><span>Detections are heuristic. Confidence reflects how strong the evidence is.</span></div></footer>
+
+<script>
+(() => {
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const show = id => ["home","loading","error","report"].forEach(s => $("#" + s).hidden = s !== id);
+
+const PALETTE = ["#4f46e5","#0891b2","#059669","#d97706","#dc2626","#7c3aed","#db2777","#2563eb","#65a30d","#ea580c","#0d9488","#9333ea"];
+const colorFor = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
+const initials = s => s.replace(/[^A-Za-z0-9 .]/g, "").split(/[\s.]+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase() || "?";
+
+const CAT_ORDER = ["Hosting","CDN","Web Server","Operating System","Caching","CMS","Ecommerce","Headless CMS","Page Builder","Static Site Generator",
+  "JavaScript Framework","Framework","Language","Database","JavaScript Library","UI Framework","Build Tool","Font","Analytics","Tag Manager","Monitoring",
+  "Marketing Pixel","Advertising","Marketing Automation","Email Marketing","Payment","Live Chat","A/B Testing","Feature Flags","Cookie Consent","SEO",
+  "Search","Media","Video","Maps","Forms","Scheduling","Comments","Social","Reviews","WordPress Plugin","DNS","Email Hosting","Email Delivery",
+  "Email Security","SSL Certificate","Security","Protocol","SaaS","Miscellaneous"];
+const catRank = c => { const i = CAT_ORDER.indexOf(c); return i < 0 ? 99 : i; };
+
+// ---------- routing
+const host = location.host;
+$("#hostPrefix").textContent = host + "/";
+$("#urlHint").textContent = host + "/example.com";
+
+function go(raw) {
+  let d = String(raw || "").trim().replace(/^[a-z]+:\/\//i, "").split(/[/?#]/)[0].toLowerCase();
+  if (d) location.href = "/" + encodeURIComponent(d).replace(/%2E/gi, ".");
+}
+for (const f of [$("#homeSearch"), $("#topSearch")]) f.addEventListener("submit", e => { e.preventDefault(); go(f.d.value); });
+
+const target = decodeURIComponent(location.pathname.slice(1)).replace(/\/+$/, "");
+if (!target) { show("home"); document.title = "StackCheck · What is that website built with?"; }
+else run(target, new URLSearchParams(location.search).has("refresh"));
+
+// ---------- scan
+async function run(domain, refresh) {
+  $("#topSearch").hidden = false;
+  $("#topSearch").d.value = domain;
+  $("#loadingDomain").textContent = domain;
+  document.title = domain + " · StackCheck";
+  show("loading");
+  const msgs = ["Resolving DNS…","Fetching the homepage…","Inspecting TLS certificate…","Matching fingerprints…","Checking mail & DNS providers…","Almost there…"];
+  let i = 0; const timer = setInterval(() => $("#steps").textContent = msgs[Math.min(++i, msgs.length - 1)], 1100);
+  try {
+    const r = await fetch("/api/" + encodeURIComponent(domain) + (refresh ? "?refresh=1" : ""), {headers: {Accept: "application/json"}});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+    render(data);
+    if (refresh) history.replaceState(null, "", "/" + data.domain);
+  } catch (e) {
+    $("#errorMsg").textContent = e.message;
+    show("error");
+  } finally { clearInterval(timer); }
+}
+
+// ---------- render
+function render(d) {
+  const techs = d.technologies || [];
+  const http = d.http || {}; const tls = d.tls || {}; const dns = d.dns || {};
+  document.title = d.domain + " · StackCheck";
+  const secCount = (d.security_headers || []).filter(h => h.present).length;
+  const days = tls.days_left;
+  const wp = d.wordpress;
+  const tabs = [
+    ["Technologies", techPanel(techs)],
+    ...(wp ? [[`WordPress <span class="badge">${wp.themes.length + wp.plugins.length}</span>`, wpPanel(wp)]] : []),
+    ["Infrastructure", infraPanel(d)],
+    ["Security", securityPanel(d)],
+    ["Headers", headersPanel(http)],
+    ["Raw JSON", `<pre class="raw">${esc(JSON.stringify(d, null, 2))}</pre>`],
+  ];
+
+  $("#report").innerHTML = `
+    <div class="site">
+      <div class="avatar" style="background:${colorFor(d.domain)}">${esc(d.domain[0].toUpperCase())}</div>
+      <div style="min-width:0;flex:1">
+        <h2>${esc(d.domain)}</h2>
+        <div class="title">${esc(d.summary?.title || "")}</div>
+      </div>
+      <div class="actions">
+        <a class="btn" href="${esc(http.final_url || "https://" + d.domain)}" target="_blank" rel="noopener noreferrer">Visit ↗</a>
+        <a class="btn" href="/${esc(d.domain)}?refresh=1">Rescan</a>
+        <a class="btn" href="/${esc(d.domain)}.json" target="_blank">JSON</a>
+      </div>
+    </div>
+    <div class="stats">
+      ${stat("Technologies", techs.length)}
+      ${stat("HTTP status", http.status ?? "–")}
+      ${stat("Response", http.response_ms != null ? http.response_ms + " ms" : "–")}
+      ${stat("TLS", tls.protocol ? tls.protocol.replace("TLSv", "TLS ") : "none")}
+      ${stat("Cert expires", days != null ? days + " days" : "–")}
+      ${stat("Security headers", secCount + " / " + (d.security_headers || []).length)}
+      ${wp ? stat("WP plugins", wp.plugins.length) : ""}
+    </div>
+    <div class="tabs" role="tablist">
+      ${tabs.map(([t], i) =>
+        `<button class="tab" role="tab" data-tab="${i}" aria-selected="${i === 0}">${t}</button>`).join("")}
+    </div>
+    ${tabs.map(([, html], i) => `<div data-panel="${i}"${i ? " hidden" : ""}>${html}</div>`).join("")}
+    <p class="note">Scanned ${esc(new Date(d.scanned_at).toLocaleString())} in ${d.duration_ms} ms${d.cached ? ' <span class="badge">cached</span>' : ""}.
+      ${(d.errors || []).map(e => `<br>⚠ ${esc(e)}`).join("")}</p>`;
+  show("report");
+
+  $("#report").querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => {
+    $("#report").querySelectorAll(".tab").forEach(x => x.setAttribute("aria-selected", x === b));
+    $("#report").querySelectorAll("[data-panel]").forEach(p => p.hidden = p.dataset.panel !== b.dataset.tab);
+  }));
+  const q = $("#techFilter"), hideLow = $("#hideLow");
+  const apply = () => {
+    const term = q.value.trim().toLowerCase();
+    const panel = $('#report [data-panel="0"]');
+    panel.querySelectorAll(".tech").forEach(t => {
+      const match = !term || t.dataset.search.includes(term);
+      t.hidden = !match || (hideLow.checked && t.dataset.level === "low");
+    });
+    panel.querySelectorAll(".cat").forEach(c => c.hidden = ![...c.querySelectorAll(".tech")].some(t => !t.hidden));
+  };
+  q?.addEventListener("input", apply); hideLow?.addEventListener("change", apply);
+}
+
+const stat = (k, v) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v" title="${esc(v)}">${esc(v)}</div></div>`;
+
+function techPanel(techs) {
+  if (!techs.length) return `<div class="panel">No technologies detected. The site may block automated requests or render everything client-side.</div>`;
+  const groups = {};
+  for (const t of techs) (groups[t.category] ||= []).push(t);
+  const cats = Object.keys(groups).sort((a, b) => catRank(a) - catRank(b) || a.localeCompare(b));
+  return `
+    <div class="filter">
+      <input id="techFilter" placeholder="Filter technologies…" aria-label="Filter technologies">
+      <label><input type="checkbox" id="hideLow"> Hide low confidence</label>
+    </div>
+    <div class="cats">${cats.map(c => `
+      <div class="cat"><h3><span>${esc(c)}</span><span>${groups[c].length}</span></h3>
+        ${groups[c].sort((a, b) => b.confidence - a.confidence).map(techRow).join("")}
+      </div>`).join("")}
+    </div>`;
+}
+
+function techRow(t) {
+  return `<details class="tech" data-level="${t.level}" data-search="${esc((t.name + " " + t.category).toLowerCase())}">
+    <summary>
+      <span class="ico" style="background:${colorFor(t.name)}">${esc(initials(t.name))}</span>
+      <span class="tname">${esc(t.name)}</span>
+      ${t.version ? `<span class="ver">${esc(t.version)}</span>` : ""}
+      <span class="conf ${t.level}" title="Confidence">${t.confidence}%</span>
+      <svg class="chev" width="14" height="14" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+    </summary>
+    <div class="evidence">
+      ${t.evidence.map(e => `<div class="row"><span class="src">${esc(e.source)}</span><code>${esc(e.match)}</code></div>`).join("")}
+      ${t.website ? `<a class="site-link" href="${esc(t.website)}" target="_blank" rel="noopener noreferrer">${esc(t.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, ""))} ↗</a>` : ""}
+    </div>
+  </details>`;
+}
+
+function wpPanel(wp) {
+  const row = (x, kind) => {
+    const tag = kind === "themes" ? x.role : x.mu ? "must-use" : "";
+    const wporg = `https://wordpress.org/${kind}/${encodeURIComponent(x.slug)}/`;
+    return `<details class="tech wp">
+      <summary>
+        <span class="ico" style="background:${colorFor(x.slug)}">${esc(initials(x.name))}</span>
+        <span class="tname">${esc(x.name)}</span>
+        ${x.version ? `<span class="ver">${esc(x.version)}</span>` : ""}
+        ${tag ? `<span class="badge">${esc(tag)}</span>` : ""}
+        <span class="slug">${esc(x.slug)}</span>
+        <svg class="chev" width="14" height="14" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </summary>
+      <div class="evidence">
+        ${x.author ? `<div class="row"><span class="src">author</span><code>${esc(x.author)}</code></div>` : ""}
+        ${x.assets ? `<div class="row"><span class="src">files</span><code>${x.assets} reference${x.assets === 1 ? "" : "s"} on the homepage</code></div>` : ""}
+        ${x.evidence.map(e => `<div class="row"><span class="src">seen</span><code>${esc(e)}</code></div>`).join("")}
+        <a class="site-link" href="${esc(wporg)}" target="_blank" rel="noopener noreferrer">wordpress.org/${kind}/${esc(x.slug)} ↗</a>
+        ${x.uri ? ` · <a class="site-link" href="${esc(x.uri)}" target="_blank" rel="noopener noreferrer">${esc(x.uri.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, ""))} ↗</a>` : ""}
+      </div>
+    </details>`;
+  };
+  const group = (title, items, kind, empty) => `<div class="cat"><h3><span>${title}</span><span>${items.length}</span></h3>
+    ${items.length ? items.map(x => row(x, kind)).join("") : `<div class="tech" style="padding:10px 14px;color:var(--muted)">${empty}</div>`}</div>`;
+  return `<div class="cats">
+      ${group("Theme", wp.themes, "themes", "No theme files referenced on the homepage.")}
+      ${group("Plugins", wp.plugins, "plugins", "No plugin files referenced on the homepage.")}
+    </div>
+    <p class="note">Only themes and plugins that load files or leave markers on the homepage are visible from outside.
+      Plugins that work only in the admin, on other pages, or are bundled into a combined file won't show up.
+      Versions come from <code>?ver=</code> on asset URLs and the theme's <code>style.css</code>, so treat them as a guide.
+      A wordpress.org link 404s for premium or custom plugins.</p>`;
+}
+
+const lines = arr => (arr && arr.length) ? arr.map(x => `<div>${esc(x)}</div>`).join("") : `<span style="color:var(--muted)">–</span>`;
+
+function infraPanel(d) {
+  const dns = d.dns || {}, tls = d.tls || {}, http = d.http || {};
+  const ptr = Object.entries(dns.PTR || {}).map(([ip, n]) => `${ip} → ${n.join(", ") || "no PTR"}`);
+  const cname = Object.entries(dns.CNAME || {}).map(([h, v]) => `${h} → ${v.join(", ")}`);
+  const redirects = (http.redirects || []).map(r => `${r.status} → ${r.to}`);
+  return `<div class="grid2">
+    <div class="panel"><h3>Server</h3><dl class="kv">
+      <dt>Final URL</dt><dd>${lines([http.final_url])}</dd>
+      <dt>Redirects</dt><dd>${lines(redirects)}</dd>
+      <dt>Server</dt><dd>${lines(http.server ? [http.server] : [])}</dd>
+      <dt>Powered by</dt><dd>${lines(http.powered_by ? [http.powered_by] : [])}</dd>
+      <dt>IPv4</dt><dd>${lines(dns.A)}</dd>
+      <dt>IPv6</dt><dd>${lines(dns.AAAA)}</dd>
+      <dt>Reverse DNS</dt><dd>${lines(ptr)}</dd>
+    </dl></div>
+    <div class="panel"><h3>SSL / TLS</h3><dl class="kv">
+      <dt>Status</dt><dd>${tls.valid ? '<span style="color:var(--good)">valid</span>' : `<span style="color:var(--bad)">${esc(tls.error || "not available")}</span>`}</dd>
+      <dt>Issuer</dt><dd>${lines([tls.issuer, tls.issuer_org].filter(Boolean))}</dd>
+      <dt>Subject</dt><dd>${lines(tls.subject ? [tls.subject] : [])}</dd>
+      <dt>Valid</dt><dd>${lines(tls.not_before ? [tls.not_before + " → " + tls.not_after + (tls.days_left != null ? ` (${tls.days_left} days left)` : "")] : [])}</dd>
+      <dt>Protocol</dt><dd>${lines([tls.protocol, tls.cipher, tls.alpn && ("ALPN " + tls.alpn)].filter(Boolean))}</dd>
+      <dt>Names</dt><dd>${lines((tls.san || []).slice(0, 8).concat((tls.san || []).length > 8 ? [`+${tls.san.length - 8} more`] : []))}</dd>
+    </dl></div>
+    <div class="panel"><h3>DNS <span class="badge">zone ${esc(dns.zone || "")}</span>${dns.dnssec ? '<span class="badge">DNSSEC</span>' : ""}</h3><dl class="kv">
+      <dt>Nameservers</dt><dd>${lines(dns.NS)}</dd>
+      <dt>CNAME</dt><dd>${lines(cname)}</dd>
+      <dt>MX</dt><dd>${lines(dns.MX)}</dd>
+      <dt>CAA</dt><dd>${lines(dns.CAA)}</dd>
+      <dt>DMARC</dt><dd>${lines(dns.DMARC)}</dd>
+    </dl></div>
+    <div class="panel"><h3>TXT records</h3><dl class="kv" style="grid-template-columns:1fr"><dd>${lines(dns.TXT)}</dd></dl></div>
+  </div>`;
+}
+
+function securityPanel(d) {
+  const tls = d.tls || {}, dns = d.dns || {}, http = d.http || {};
+  const spf = (dns.TXT || []).find(t => /^v=spf1/i.test(t));
+  const extra = [
+    {header: "HTTPS", present: !!http.https, why: "Final page is served over HTTPS"},
+    {header: "Valid certificate", present: !!tls.valid, why: "Certificate chain verifies for this hostname", value: tls.valid ? null : tls.error},
+    {header: "SPF", present: !!spf, why: "Declares which servers may send mail for the domain", value: spf},
+    {header: "DMARC", present: !!(dns.DMARC || []).length, why: "Tells receivers what to do with spoofed mail", value: (dns.DMARC || [])[0]},
+    {header: "CAA", present: !!(dns.CAA || []).length, why: "Restricts which CAs may issue certificates"},
+    {header: "DNSSEC", present: !!dns.dnssec, why: "DNS answers are cryptographically signed"},
+  ];
+  const row = h => `<div class="check"><span class="dot ${h.present ? "ok" : "no"}">${h.present ? "✓" : "✕"}</span>
+    <div><b>${esc(h.header)}</b><small>${esc(h.why)}</small>${h.value ? `<code>${esc(String(h.value).slice(0, 220))}</code>` : ""}</div></div>`;
+  return `<div class="grid2">
+    <div class="panel"><h3>HTTP security headers</h3>${(d.security_headers || []).map(row).join("")}</div>
+    <div class="panel"><h3>Transport & email</h3>${extra.map(row).join("")}</div>
+  </div>`;
+}
+
+function headersPanel(http) {
+  const h = http.headers || {};
+  const rows = Object.keys(h).sort().map(k => `<tr><td>${esc(k)}</td><td>${esc(h[k])}</td></tr>`).join("");
+  return `<div class="panel"><h3>Response headers</h3><table class="headers" style="width:100%;border-collapse:collapse">${rows || "<tr><td>none</td></tr>"}</table>
+    ${(http.cookies || []).length ? `<h3 style="margin-top:18px">Cookies set</h3><div style="font-family:var(--mono);font-size:12px">${http.cookies.map(esc).join(", ")}</div>` : ""}</div>`;
+}
+})();
+</script>
+</body>
+</html>
