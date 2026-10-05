@@ -1,7 +1,11 @@
 """Offline unit tests:  python3 -m unittest discover tests"""
+import gzip
 import os
+import socket
 import sys
 import unittest
+import zlib
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import stackcheck as sc  # noqa: E402
@@ -180,3 +184,120 @@ class WordPressTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SecurityTests(unittest.TestCase):
+    """Attacks a scanned site (or its DNS) could try. All offline: DNS and HTTP are mocked."""
+
+    def test_decompression_bomb_is_capped(self):
+        bomb = gzip.compress(b"\0" * 200_000_000)  # ~194 KB on the wire, 200 MB expanded
+        out, truncated = sc._decompress(bomb, "gzip", 3_000_000)
+        self.assertEqual(len(out), 3_000_000)
+        self.assertTrue(truncated)
+        raw = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        deflated = raw.compress(b"\0" * 50_000_000) + raw.flush()
+        out, truncated = sc._decompress(deflated, "deflate", 1_000)
+        self.assertEqual((len(out), truncated), (1_000, True))
+        self.assertEqual(sc._decompress(gzip.compress(b"hello"), "gzip", 100), (b"hello", False))
+        self.assertEqual(sc._decompress(b"plain", "", 100), (b"plain", False))
+
+    def test_only_ports_80_and_443(self):
+        with self.assertRaises(sc.ScanError):
+            sc._connect_public("example.com", 8080, 1)
+
+    def test_dns_rebinding_is_refused_at_connect(self):
+        """The name looks public when first checked, then resolves to loopback for the real connection."""
+        answers = iter([[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", 0))]] +
+                       [[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]] * 5)
+        with mock.patch.object(sc.socket, "getaddrinfo", side_effect=lambda *a, **k: next(answers)), \
+                mock.patch.object(sc.socket, "socket") as sock:
+            sc.assert_public("rebind.example")  # first answer: public, passes
+            with self.assertRaises(sc.ScanError):
+                sc._fetch_once("http://rebind.example/", True)
+            sock.assert_not_called()  # refused before any connection was opened
+
+    def test_redirect_guard(self):
+        req = mock.Mock(full_url="https://ex.com/")
+        g = sc._GuardedRedirect(scope=("ex.com",))
+        for bad in ["ftp://ex.com/x", "file:///etc/passwd", "https://victim.org/"]:
+            with self.assertRaises(sc.ScanError, msg=bad):
+                g.redirect_request(req, None, 302, "Found", mock.Mock(), bad)
+
+    def test_scope(self):
+        roots = sc.site_roots("www.ex.com", "ex.com", None)
+        self.assertEqual(roots, ("ex.com",))
+        self.assertTrue(sc.in_scope("cdn.ex.com", roots))
+        self.assertTrue(sc.in_scope("EX.com.", roots))
+        self.assertFalse(sc.in_scope("evilex.com", roots))
+        self.assertFalse(sc.in_scope("ex.com.victim.org", roots))
+        with mock.patch.object(sc, "_fetch_once") as fetch:
+            self.assertIsNone(sc._get("https://victim.org/sitemap.xml", scope=roots))
+            self.assertIsNone(sc._get("javascript:alert(1)", scope=roots))
+            fetch.assert_not_called()
+
+    def test_rest_root_must_be_on_site(self):
+        http = {"headers": {"link": '<https://victim.org/wp-json/>; rel="https://api.w.org/"'}, "html": "",
+                "final_url": "https://ex.com/"}
+        self.assertEqual(sc.wp_rest_root(http, ("ex.com",)), "https://ex.com/wp-json/")
+
+    def test_stream_sitemap_counts_big_compressed_files(self):
+        """A 60 MB gzip sitemap is counted exactly, a few KB at a time, and a bomb stops at the ceiling."""
+        entry = b"<url><loc>https://ex.com/p</loc></url>\n"
+        body = gzip.compress(b"<?xml version='1.0'?><urlset>" + entry * 1_500_000 + b"</urlset>")
+
+        class Resp:
+            def __init__(self, data):
+                self.data, self.pos, self.status = data, 0, 200
+                self.headers = {"Content-Encoding": "gzip"}
+            def read(self, n):
+                chunk = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return chunk
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch.object(sc, "_open", return_value=(Resp(body), None)):
+            r = sc._stream_sitemap("https://ex.com/s.xml", True, ("ex.com",))
+        self.assertEqual((r["urls"], r["truncated"]), (1_500_000, False))
+        self.assertIn("<urlset>", r["head"])
+        with mock.patch.object(sc, "_open", return_value=(Resp(gzip.compress(entry * 6_000_000)), None)):
+            r = sc._stream_sitemap("https://ex.com/s.xml", True, ("ex.com",))
+        self.assertTrue(r["truncated"])  # 240 MB expanded: stopped at STREAM_MAX_OUT
+        self.assertIsNone(sc._stream_sitemap("https://victim.org/s.xml", True, ("ex.com",)))
+
+    def test_sitemaps_off_site_are_not_fetched(self):
+        index = ("<sitemapindex><sitemap><loc>https://ex.com/post-sitemap.xml</loc></sitemap>"
+                 + "".join(f"<sitemap><loc>https://victim.org/{i}.xml</loc></sitemap>" for i in range(12))
+                 + "</sitemapindex>")
+        pages = {
+            "https://ex.com/robots.txt": "Sitemap: https://victim.org/big.xml\nSitemap: https://ex.com/sitemap_index.xml",
+            "https://ex.com/sitemap_index.xml": index,
+        }
+        fetched = []
+
+        def fake_get(url, verify=True, scope=None, max_bytes=None):
+            fetched.append(url)
+            if url not in pages:
+                return None
+            return {"status": 200, "html": pages[url], "final_url": url, "headers": {"content-type": "text/plain"},
+                    "truncated": False}
+
+        def fake_stream(url, verify, scope):
+            fetched.append(url)
+            return {"status": 200, "head": "<urlset>", "urls": 1, "truncated": False}
+
+        with mock.patch.object(sc, "_get", side_effect=fake_get), \
+                mock.patch.object(sc, "_stream_sitemap", side_effect=fake_stream):
+            s = sc.sitemap_info("https://ex.com/", True, ("ex.com",))
+        self.assertFalse([u for u in fetched if "victim.org" in u])
+        self.assertEqual((s["url"], s["urls"], s["offsite"]), ("https://ex.com/sitemap_index.xml", 1, 13))
+
+    def test_theme_uri_must_be_http(self):
+        html = "<link rel='stylesheet' href='https://ex.com/wp-content/themes/evil/style.css'>"
+        http = {"html": html, "final_url": "https://ex.com/", "verified": True}
+        with mock.patch.object(sc, "_theme_header",
+                               return_value={"theme name": "Evil", "theme uri": "javascript:alert(1)"}):
+            wp = sc.wordpress_details(http, sc.extract_html(html)["urls"], None, ("ex.com",))
+        self.assertIsNone(wp["themes"][0]["uri"])

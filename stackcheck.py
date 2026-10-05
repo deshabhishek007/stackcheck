@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import argparse
 import base64
-import gzip
 import html as html_lib
+import http.client
 import ipaddress
 import json
 import os
@@ -342,7 +342,7 @@ def tls_probe(host: str) -> dict:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         ctx.set_alpn_protocols(["h2", "http/1.1"])
-        with socket.create_connection((host, 443), timeout=Config.timeout) as sock:
+        with _connect_public(host, 443, Config.timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ss:
                 cert = ss.getpeercert() if verify else _decode_der_cert(ss.getpeercert(binary_form=True) or b"")
                 return cert, ss.version(), ss.cipher(), ss.selected_alpn_protocol()
@@ -381,34 +381,114 @@ def tls_probe(host: str) -> dict:
 
 # --------------------------------------------------------------------------- HTTP fetch
 
+ALLOWED_PORTS = {80, 443}
+
+
+def _connect_public(host: str, port: int, timeout) -> socket.socket:
+    """Open a TCP connection to host:port, resolving the name exactly once.
+
+    Every resolved address must be public (unless --allow-private), and the socket connects to one of those
+    same addresses. Checking a name and then letting the HTTP library resolve it again would let a DNS answer
+    that changes in between (DNS rebinding) reach an internal service."""
+    if port not in ALLOWED_PORTS:
+        raise ScanError(f"Refusing to connect to {host} on port {port}; only ports 80 and 443 are allowed.", 403)
+    if not isinstance(timeout, (int, float)):
+        timeout = Config.timeout
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise ScanError(f"Could not resolve {host}.", 404)
+    if not Config.allow_private and any(not ip_is_public(info[4][0]) for info in infos):
+        raise ScanError(f"{host} resolves to a non-public address; refusing to connect.", 403)
+    last: OSError | None = None
+    for family, stype, proto, _, addr in infos:
+        s = socket.socket(family, stype, proto)
+        s.settimeout(timeout)
+        try:
+            s.connect(addr)
+            return s
+        except OSError as e:
+            last = e
+            s.close()
+    raise last or OSError(f"Could not connect to {host}")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = _connect_public(self.host, self.port, self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        sock = _connect_public(self.host, self.port, self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
+
+
+def site_roots(*hosts: str | None) -> tuple[str, ...]:
+    """Hosts that, with their subdomains, count as the scanned site: the domain and final host, minus www."""
+    out: list[str] = []
+    for h in hosts:
+        h = (h or "").lower().rstrip(".")
+        h = h[4:] if h.startswith("www.") else h
+        if h and h not in out:
+            out.append(h)
+    return tuple(out)
+
+
+def in_scope(host: str, roots: tuple[str, ...]) -> bool:
+    host = (host or "").lower().rstrip(".")
+    return any(host == r or host.endswith("." + r) for r in roots)
+
+
 class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
     max_redirections = 8
 
-    def __init__(self):
+    def __init__(self, scope: tuple[str, ...] | None = None):
+        self.scope = scope
         self.chain: list[dict] = []
         self.cookies: list[str] = []
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        host = urllib.parse.urlsplit(newurl).hostname or ""
-        assert_public(host)  # re-check every hop (SSRF)
+        parts = urllib.parse.urlsplit(newurl)
+        if parts.scheme not in ("http", "https"):
+            raise ScanError(f"Refusing to follow a redirect to a {parts.scheme or 'relative'}: URL.", 403)
+        host = parts.hostname or ""
+        if self.scope is not None and not in_scope(host, self.scope):
+            raise ScanError(f"Refusing to follow a redirect off the scanned site to {host}.", 403)
+        assert_public(host)  # early, friendlier error; _connect_public re-checks the address it connects to
         self.chain.append({"status": code, "from": req.full_url, "to": newurl})
         self.cookies.extend(headers.get_all("Set-Cookie") or [])
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _decompress(body: bytes, encoding: str) -> bytes:
+def _decompress(body: bytes, encoding: str, limit: int) -> tuple[bytes, bool]:
+    """Decode gzip/deflate into at most `limit` bytes, so a small compressed body can't expand into gigabytes.
+    Returns (data, truncated)."""
     encoding = (encoding or "").lower()
-    try:
-        if "gzip" in encoding:
-            return gzip.decompress(body)
-        if "deflate" in encoding:
-            try:
-                return zlib.decompress(body)
-            except zlib.error:
-                return zlib.decompress(body, -zlib.MAX_WBITS)
-    except Exception:
-        pass
-    return body
+    if "gzip" in encoding:
+        modes = [16 + zlib.MAX_WBITS]
+    elif "deflate" in encoding:
+        modes = [zlib.MAX_WBITS, -zlib.MAX_WBITS]  # zlib-wrapped, then raw deflate
+    else:
+        modes = []
+    for wbits in modes:
+        try:
+            d = zlib.decompressobj(wbits)
+            out = d.decompress(body, limit)
+            return out, bool(d.unconsumed_tail)
+        except zlib.error:
+            continue
+    return body[:limit], len(body) > limit
 
 
 def http_fetch(host: str) -> dict:
@@ -432,31 +512,41 @@ def http_fetch(host: str) -> dict:
     raise ScanError(f"Could not fetch {host}: {getattr(last_err, 'reason', last_err)}", 502)
 
 
-def _fetch_once(url: str, verify: bool) -> dict:
+def _open(url: str, verify: bool, scope: tuple[str, ...] | None):
     ctx = ssl.create_default_context()
     if not verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    redirect = _GuardedRedirect()
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), redirect)
+    redirect = _GuardedRedirect(scope)
+    # Built by hand rather than with build_opener(): only http(s), every connection pinned and checked,
+    # and no ftp:, file: or environment proxy handlers.
+    opener = urllib.request.OpenerDirector()
+    for handler in (_PinnedHTTPHandler(), _PinnedHTTPSHandler(context=ctx), redirect,
+                    urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor()):
+        opener.add_handler(handler)
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate",
     })
-    t0 = time.monotonic()
     try:
-        resp = opener.open(req, timeout=Config.timeout)
+        return opener.open(req, timeout=Config.timeout), redirect
     except urllib.error.HTTPError as e:  # 4xx/5xx still carry useful headers and HTML
-        resp = e
+        return e, redirect
+
+
+def _fetch_once(url: str, verify: bool, scope: tuple[str, ...] | None = None, max_bytes: int | None = None) -> dict:
+    limit = max_bytes or Config.max_body
+    t0 = time.monotonic()
+    resp, redirect = _open(url, verify, scope)
     with resp:
-        raw = resp.read(Config.max_body)
+        raw = resp.read(limit + 1)
         status = resp.status if hasattr(resp, "status") else resp.code
         headers = resp.headers
         final_url = resp.geturl()
     elapsed = int((time.monotonic() - t0) * 1000)
-    body = _decompress(raw, headers.get("Content-Encoding", ""))
+    body, cut = _decompress(raw[:limit], headers.get("Content-Encoding", ""), limit)
     m = re.search(r"charset=([\w-]+)", headers.get("Content-Type", ""), re.I)
     charset = m.group(1) if m else "utf-8"
     try:
@@ -471,15 +561,64 @@ def _fetch_once(url: str, verify: bool) -> dict:
     return {
         "url": url, "final_url": final_url, "status": status, "verified": verify,
         "redirects": redirect.chain, "response_ms": elapsed,
-        "headers": hdrs, "cookies": cookies, "html": html, "truncated": len(raw) >= Config.max_body,
+        "headers": hdrs, "cookies": cookies, "html": html, "truncated": len(raw) > limit or cut,
     }
 
 
-def _get(url: str, verify: bool = True) -> dict | None:
-    """Fetch a secondary URL (robots.txt, sitemap, REST API) on a public host. None on any failure."""
+STREAM_MAX_RAW = 20_000_000    # bytes downloaded when streaming a large sitemap
+STREAM_MAX_OUT = 200_000_000   # bytes decompressed; scanned in 1 MB pieces and never held in memory
+_URL_TAG = re.compile(rb"<url[\s>]", re.I)  # 5 bytes, so a 4-byte carry-over can't hold a whole match
+
+
+def _stream_sitemap(url: str, verify: bool, scope: tuple[str, ...]) -> dict | None:
+    """Count <url> entries in a sitemap of any size with flat memory use: decompress in 1 MB pieces, count,
+    and keep only the first 64 KB (enough to tell an index from a urlset). None on failure."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https") or not in_scope(parts.hostname or "", scope):
+        return None
     try:
-        assert_public(urllib.parse.urlsplit(url).hostname or "")
-        return _fetch_once(url, verify)
+        resp, _ = _open(url, verify, scope)
+        with resp:
+            status = resp.status if hasattr(resp, "status") else resp.code
+            enc = resp.headers.get("Content-Encoding", "").lower()
+            wbits = 16 + zlib.MAX_WBITS if "gzip" in enc else zlib.MAX_WBITS if "deflate" in enc else None
+            d = zlib.decompressobj(wbits) if wbits else None
+            head, carry, count, raw, out, truncated = bytearray(), b"", 0, 0, 0, False
+            while not truncated:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                raw += len(chunk)
+                pending = chunk
+                while pending and not truncated:  # one 1 MB piece at a time, however well it compresses
+                    if d is None:
+                        buf, pending = pending, b""
+                    else:
+                        buf = d.decompress(pending, 1 << 20)
+                        pending = d.unconsumed_tail
+                    out += len(buf)
+                    if len(head) < 65536:
+                        head += buf[:65536 - len(head)]
+                    text = carry + buf
+                    count += len(_URL_TAG.findall(text))
+                    carry = text[-4:]
+                    truncated = out > STREAM_MAX_OUT
+                truncated = truncated or raw > STREAM_MAX_RAW
+    except Exception:
+        return None
+    return {"status": status, "head": head.decode("utf-8", "replace"), "urls": count, "truncated": truncated}
+
+
+def _get(url: str, verify: bool = True, scope: tuple[str, ...] | None = None,
+         max_bytes: int | None = None) -> dict | None:
+    """Fetch a secondary URL (robots.txt, sitemap, REST API, theme stylesheet). None on any failure.
+    With `scope`, the URL and every redirect must stay on the scanned site, so a scanned page can't
+    point StackCheck's requests at someone else."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https") or (scope is not None and not in_scope(parts.hostname or "", scope)):
+        return None
+    try:
+        return _fetch_once(url, verify, scope, max_bytes)
     except Exception:
         return None
 
@@ -648,6 +787,9 @@ class Fingerprints:
 
 # --------------------------------------------------------------------------- WordPress themes & plugins
 
+SMALL_FETCH = 512_000     # robots.txt and REST API responses
+STYLE_FETCH = 256_000     # a theme's style.css; only the header comment at the top is read
+
 WP_ASSET_RE = re.compile(r"/wp-content/(plugins|mu-plugins|themes)/([a-z0-9_.-]+)/([^\s\"'<>()\\]*)", re.I)
 WP_VERSION_RE = re.compile(r"\d+(?:\.\d+)+[a-z0-9.-]*", re.I)
 WP_THEME_HEADER_RE = re.compile(r"^[\s/*#@]*(Theme Name|Version|Template|Author|Theme URI)\s*:\s*(.+?)\s*$",
@@ -770,24 +912,25 @@ def wp_assets(html: str, urls: list[str], final_url: str, core_version: str | No
     return {"themes": themes, "plugins": plugins}
 
 
-def _theme_header(url: str, verify: bool) -> dict:
-    r = _get(url, verify)
+def _theme_header(url: str, verify: bool, scope: tuple[str, ...]) -> dict:
+    r = _get(url, verify, scope, STYLE_FETCH)
     return parse_theme_header(r["html"]) if r and r["status"] == 200 else {}
 
 
-def wordpress_details(http: dict, urls: list[str], core_version: str | None) -> dict:
+def wordpress_details(http: dict, urls: list[str], core_version: str | None, scope: tuple[str, ...]) -> dict:
     wp = wp_assets(http["html"], urls, http["final_url"], core_version)
     themes = wp["themes"]
 
     def apply_headers(items):
-        futs = [(t, _leaf_pool.submit(_theme_header, t["stylesheet"], http["verified"])) for t in items]
+        futs = [(t, _leaf_pool.submit(_theme_header, t["stylesheet"], http["verified"], scope)) for t in items]
         for t, f in futs:
             h = f.result()
             if h:
                 t["name"] = h["theme name"]
                 t["version"] = h.get("version") or t["version"]
                 t["author"] = h.get("author")
-                t["uri"] = h.get("theme uri")
+                uri = h.get("theme uri") or ""
+                t["uri"] = uri if re.match(r"https?://", uri, re.I) else None  # never javascript: and friends
                 t["parent"] = h.get("template")
                 t["evidence"].append(f"{t['stylesheet']} → Theme Name: {h['theme name']}")
 
@@ -840,15 +983,22 @@ WP_REST_COUNTS = [("posts", "wp/v2/posts"), ("pages", "wp/v2/pages"), ("categori
                   ("tags", "wp/v2/tags"), ("users", "wp/v2/users")]
 
 
-def wp_rest_root(http: dict) -> str:
-    """The REST API root the site advertises (Link header or <link rel>), else /wp-json/ on the final origin."""
+def wp_rest_root(http: dict, scope: tuple[str, ...] | None = None) -> str:
+    """The REST API root the site advertises (Link header or <link rel>), else /wp-json/ on the final origin.
+    An advertised root off the scanned site is ignored."""
+    found = []
     m = re.search(r'<([^>]+)>\s*;\s*rel="https://api\.w\.org/"', http["headers"].get("link", ""))
     if m:
-        return urllib.parse.urljoin(http["final_url"], m.group(1))
+        found.append(m.group(1))
     for tag in re.findall(r"<link\b[^>]*>", http["html"][:600_000], re.I):
         a = _attrs(tag)
         if a.get("rel") == "https://api.w.org/" and a.get("href"):
-            return urllib.parse.urljoin(http["final_url"], html_lib.unescape(a["href"]))
+            found.append(html_lib.unescape(a["href"]))
+    for u in found:
+        u = urllib.parse.urljoin(http["final_url"], u)
+        parts = urllib.parse.urlsplit(u)
+        if parts.scheme in ("http", "https") and (scope is None or in_scope(parts.hostname or "", scope)):
+            return u
     return urllib.parse.urljoin(http["final_url"], "/wp-json/")
 
 
@@ -863,14 +1013,14 @@ def wp_rest_url(root: str, route: str, **params) -> str:
     return root.rstrip("/") + "/" + route + ("?" + urllib.parse.urlencode(params) if params else "")
 
 
-def wp_rest_info(http: dict) -> dict:
+def wp_rest_info(http: dict, scope: tuple[str, ...]) -> dict:
     """What the public REST API reveals: status, site settings, namespaces and content counts.
     The users endpoint is only checked for being public and counted; usernames are never requested."""
-    root = wp_rest_root(http)
+    root = wp_rest_root(http, scope)
     fields = "name,description,timezone_string,gmt_offset,namespaces,authentication,show_on_front"
     urls = {"index": wp_rest_url(root, "", _fields=fields)}
     urls.update({key: wp_rest_url(root, route, per_page=1, _fields="id") for key, route in WP_REST_COUNTS})
-    futs = {k: _leaf_pool.submit(_get, u, http["verified"]) for k, u in urls.items()}
+    futs = {k: _leaf_pool.submit(_get, u, http["verified"], scope, SMALL_FETCH) for k, u in urls.items()}
     res = {k: f.result() for k, f in futs.items()}
 
     idx = res["index"]
@@ -974,18 +1124,18 @@ def sitemap_type(url: str) -> str | None:
     return None if not t or re.fullmatch(r"[\d_-]+", t) else t
 
 
-def _count_sitemap(url: str, verify: bool) -> dict:
-    r = _get(url, verify)
-    sm = parse_sitemap(r["html"]) if r and r["status"] == 200 else None
-    return {"url": url, "type": sitemap_type(url), "urls": sm["urls"] if sm and sm["kind"] == "urlset" else None,
-            "truncated": bool(r and r.get("truncated"))}
+def _count_sitemap(url: str, verify: bool, scope: tuple[str, ...]) -> dict:
+    r = _stream_sitemap(url, verify, scope)
+    ok = r and r["status"] == 200 and parse_sitemap(r["head"])["kind"] == "urlset"
+    return {"url": url, "type": sitemap_type(url), "urls": r["urls"] if ok else None,
+            "truncated": bool(ok and r["truncated"])}
 
 
-def sitemap_info(final_url: str, verify: bool) -> dict:
+def sitemap_info(final_url: str, verify: bool, scope: tuple[str, ...]) -> dict:
     origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(final_url))
     guesses = [origin + p for p in SITEMAP_GUESSES]
-    f_robots = _leaf_pool.submit(_get, origin + "/robots.txt", verify)
-    f_guess = {u: _leaf_pool.submit(_get, u, verify) for u in guesses}
+    f_robots = _leaf_pool.submit(_get, origin + "/robots.txt", verify, scope, SMALL_FETCH)
+    f_guess = {u: _leaf_pool.submit(_get, u, verify, scope) for u in guesses}
 
     robots = f_robots.result()
     robots_ok = bool(robots and robots["status"] == 200
@@ -993,12 +1143,14 @@ def sitemap_info(final_url: str, verify: bool) -> dict:
     declared = []
     if robots_ok:
         declared = list(dict.fromkeys(re.findall(r"(?im)^\s*sitemap\s*:\s*(\S+)", robots["html"])))[:10]
+    # Sitemaps on other sites are listed but never fetched: a scanned site mustn't steer our requests elsewhere.
+    offsite = [u for u in declared if not in_scope(urllib.parse.urlsplit(u).hostname or "", scope)]
 
     out = {"found": False, "robots_txt": robots_ok, "declared": declared, "url": None, "source": None,
            "kind": None, "generator": None, "urls": None, "partial": False, "sitemaps": [], "children": 0,
-           "by_type": {}}
-    for url, source in [(u, "robots.txt") for u in declared] + [(u, "guessed") for u in guesses]:
-        r = f_guess[url].result() if url in f_guess else _get(url, verify)
+           "by_type": {}, "offsite": len(offsite)}
+    for url, source in [(u, "robots.txt") for u in declared if u not in offsite] + [(u, "guessed") for u in guesses]:
+        r = f_guess[url].result() if url in f_guess else _get(url, verify, scope)
         if not r or r["status"] != 200:
             continue
         sm = parse_sitemap(r["html"])
@@ -1008,9 +1160,15 @@ def sitemap_info(final_url: str, verify: bool) -> dict:
         out.update(found=True, url=r["final_url"], source=source, kind=sm["kind"], generator=gen)
         if sm["kind"] == "urlset":
             out.update(urls=sm["urls"], partial=r["truncated"])
+            if r["truncated"]:  # larger than one normal fetch: count it again by streaming
+                c = _count_sitemap(r["final_url"], verify, scope)
+                if c["urls"] is not None:
+                    out.update(urls=c["urls"], partial=c["truncated"])
         else:
-            children = list(dict.fromkeys(sm["locs"]))
-            counted = [f.result() for f in [_leaf_pool.submit(_count_sitemap, u, verify)
+            locs = list(dict.fromkeys(sm["locs"]))
+            children = [u for u in locs if in_scope(urllib.parse.urlsplit(u).hostname or "", scope)]
+            out["offsite"] += len(locs) - len(children)
+            counted = [f.result() for f in [_leaf_pool.submit(_count_sitemap, u, verify, scope)
                                             for u in children[:SITEMAP_MAX_CHILDREN]]]
             out["children"] = len(children)
             out["sitemaps"] = counted + [{"url": u, "type": sitemap_type(u), "urls": None, "truncated": False}
@@ -1154,12 +1312,13 @@ def scan(domain: str) -> dict:
 
     techs = fingerprints().analyze(signals)
 
-    f_sitemap = _pool.submit(sitemap_info, http["final_url"], http["verified"]) if http else None
+    scope = site_roots(domain, urllib.parse.urlsplit(http["final_url"]).hostname if http else None)
+    f_sitemap = _pool.submit(sitemap_info, http["final_url"], http["verified"], scope) if http else None
     wordpress = None
     wp_tech = next((t for t in techs if t["name"] == "WordPress"), None)
     if http and (wp_tech or "/wp-content/" in http["html"]):
-        f_rest = _pool.submit(wp_rest_info, http)
-        wordpress = wordpress_details(http, page["urls"], wp_tech and wp_tech["version"])
+        f_rest = _pool.submit(wp_rest_info, http, scope)
+        wordpress = wordpress_details(http, page["urls"], wp_tech and wp_tech["version"], scope)
         wordpress["rest"] = f_rest.result()
         merge_rest_plugins(wordpress)
     sitemap = f_sitemap.result() if f_sitemap else None
@@ -1318,8 +1477,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if ctype.startswith("text/html"):
             self.send_header("Content-Security-Policy",
-                             "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-                             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
+                             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                             "img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; "
+                             "frame-ancestors 'none'")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -1351,6 +1511,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(302, b"", "text/plain", {"Location": "/" + target})
             if path in ("/", "/index.html"):
                 return self.send(200, load_static("index.html"), "text/html; charset=utf-8")
+            if path == "/app.js":
+                return self.send(200, load_static("app.js"), "text/javascript; charset=utf-8")
             if path in ("/favicon.ico", "/favicon.svg"):
                 return self.send(200, FAVICON, "image/svg+xml", {"Cache-Control": "max-age=86400"})
             if path == "/healthz":

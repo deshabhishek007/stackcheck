@@ -252,13 +252,24 @@ sudo systemctl enable --now stackcheck
 
 ## Security notes
 
-- **SSRF protection.** Before connecting, StackCheck resolves the target and refuses private, loopback,
-  link-local, CGNAT and reserved addresses. It checks again on every redirect hop. This guards against
-  the common cases, but it is not proof against a determined DNS-rebinding attack. If you run StackCheck
-  inside a sensitive network, also limit its outbound traffic at the firewall.
-- Only the homepage is fetched (capped at 3 MB), and JavaScript is not executed. Technologies that load
-  entirely at runtime through a tag manager can be missed. That is the trade-off for being lightweight.
-- The HTML report has a strict CSP and escapes everything taken from scanned sites.
+- **SSRF protection.** Every connection (page fetches, redirects, the TLS check) resolves the host once,
+  refuses it if any address is private, loopback, link-local, CGNAT or reserved, and then connects to an
+  address that passed the check. A DNS answer that changes between the check and the connection (DNS
+  rebinding) can't reach an internal service. Only ports 80 and 443 are used, only `http:` and `https:`
+  redirects are followed, and environment proxy settings are ignored. If you run StackCheck inside a
+  sensitive network, also limit its outbound traffic at the firewall as a second layer.
+- **Requests stay on the scanned site.** The extra requests (robots.txt, sitemaps, REST API, theme
+  stylesheet) only go to the scanned domain, the host it redirected to, and their subdomains, including on
+  redirects. Sitemaps or API roots that point elsewhere are listed but not fetched, so a scanned site can't
+  use StackCheck to send traffic to someone else.
+- **Size limits.** A page is read up to 3 MB, and compressed responses are only expanded up to the same
+  limit, so a small compressed "bomb" can't use gigabytes of memory. robots.txt and REST responses are
+  limited to 512 KB and a theme stylesheet to 256 KB. Sitemaps are counted while streaming, 1 MB at a time,
+  up to 20 MB downloaded and 200 MB expanded.
+- Only those few files are fetched, and JavaScript is not executed. Technologies that load entirely at
+  runtime through a tag manager can be missed. That is the trade-off for being lightweight.
+- The HTML report escapes everything taken from scanned sites, only turns `http:` and `https:` URLs into
+  links, and is served with a CSP that allows no inline scripts.
 
 ## Limitations and ideas
 
