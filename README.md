@@ -15,10 +15,10 @@ security headers**. Each detection shows the evidence it's based on and a confid
 It also finds the site's **sitemap and robots.txt**. For WordPress sites it lists the **theme and plugins**,
 checks the **REST API**, and counts **posts, pages, categories and tags**.
 
-- **One Python file, no dependencies.** Needs only Python 3.9+ and the standard library.
+- **No dependencies.** Needs only Python 3.9+ and the standard library.
 - **No third-party APIs.** It talks to the target site and a DNS resolver directly.
 - **JSON API built in.** `curl` any report URL, or add `.json` to the end.
-- **Fingerprints live in plain JSON** (`fingerprints.json`), so adding a technology is a one-line change.
+- **Fingerprints live in plain JSON** (`stackcheck/fingerprints.json`), so adding a technology is a one-line change.
 
 ---
 
@@ -132,7 +132,7 @@ For each scan StackCheck runs these steps in parallel (usually 1–3 seconds in 
 2. **TLS handshake.** Records the certificate issuer and expiry, the TLS version and ALPN (used to detect HTTP/2).
 3. **DNS lookups.** A, AAAA, CNAME, NS, MX, TXT, CAA, `_dmarc` and reverse DNS. It uses its own DNS client
    (UDP/TCP, with DNS-over-HTTPS as a fallback for restricted networks).
-4. **Fingerprint matching** against `fingerprints.json`. Sources:
+4. **Fingerprint matching** against `stackcheck/fingerprints.json`. Sources:
 
 | Source | Example | Default confidence |
 | --- | --- | --- |
@@ -186,7 +186,7 @@ marked as partial (`≥`).
 
 ### Adding a technology
 
-Add an entry to `fingerprints.json`, then restart:
+Add an entry to `stackcheck/fingerprints.json`, then restart:
 
 ```json
 "Plausible": {

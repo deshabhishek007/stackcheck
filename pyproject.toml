@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stackcheck"
+dynamic = ["version"]
+description = "Self-hosted website technology scanner: hosting, CDN, CMS, frameworks, analytics, DNS, SSL, and WordPress themes & plugins."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Abhishek Deshpande" }]
+keywords = ["technology", "scanner", "wappalyzer", "builtwith", "wordpress", "dns", "ssl", "self-hosted"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: WWW/HTTP :: Site Management",
+    "Topic :: Security",
+]
+# No runtime dependencies: StackCheck uses only the Python standard library.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/deshabhishek007/stackcheck"
+Issues = "https://github.com/deshabhishek007/stackcheck/issues"
+Security = "https://github.com/deshabhishek007/stackcheck/security/policy"
+
+[project.scripts]
+stackcheck = "stackcheck:main"
+
+[tool.hatch.version]
+# Read from the file (not by importing it), so the stackcheck.py wrapper next to the package can't be picked up.
+path = "stackcheck/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["stackcheck"]
+
+[tool.hatch.build.targets.sdist]
+include = ["stackcheck/", "tests/", "stackcheck.py", "README.md", "SECURITY.md", "LICENSE"]

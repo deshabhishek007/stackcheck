@@ -1,0 +1,30 @@
+# Fly.io. Deploy with:
+#   fly launch --copy-config --name <your-app-name> --no-deploy
+#   fly secrets set STACKCHECK_TOKEN=$(openssl rand -hex 24)    # keeps the instance private
+#   fly deploy
+app = "stackcheck"  # replaced by the name you give fly launch
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  STACKCHECK_TRUST_PROXY = "true"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

@@ -1,0 +1,16 @@
+# Render Blueprint: https://render.com/deploy?repo=https://github.com/deshabhishek007/stackcheck
+# Builds the Dockerfile. Render sets PORT, which StackCheck uses.
+services:
+  - type: web
+    name: stackcheck
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      # A public URL from the first minute, so it's private by default: Render generates a random token,
+      # shown in the service's Environment tab. Browsers prompt for it (any username); API clients send
+      # "Authorization: Bearer <token>". Delete this variable to make the instance public.
+      - key: STACKCHECK_TOKEN
+        generateValue: true
+      - key: STACKCHECK_TRUST_PROXY
+        value: "true"
