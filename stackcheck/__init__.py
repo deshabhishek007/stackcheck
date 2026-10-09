@@ -1247,7 +1247,7 @@ PAGE_HEADERS = {"content-security-policy", "content-security-policy-report-only"
                 "cross-origin-embedder-policy", "cross-origin-resource-policy"}
 BLOCK_TITLE_RE = re.compile(r"just a moment|attention required|access denied|verify (?:you are|you're) (?:a )?human|"
                             r"are you (?:a )?(?:robot|human)|captcha|ddos protection|security check|request blocked|"
-                            r"you have been blocked|bot (?:check|verification)", re.I)
+                            r"you have been blocked|bot (?:check|verification)|one moment, please", re.I)
 
 
 def detect_block(http: dict, title: str | None) -> dict | None:
@@ -1269,6 +1269,11 @@ def detect_block(http: dict, title: str | None) -> dict | None:
         return found("AWS WAF", "challenge", f"x-amzn-waf-action: {h['x-amzn-waf-action']}")
     if h.get("x-sucuri-block"):
         return found("Sucuri", "block", f"x-sucuri-block: {h['x-sucuri-block']}")
+
+    # JS bot-check interstitial served with HTTP 200 ("One moment, please..." page that posts a hidden
+    # wsidchk form back to the site). The field name is specific enough to trust at any status.
+    if "wsidchk" in html and "request is being verified" in html:
+        return found(None, "challenge", f"title: {title}" if title else "wsidchk bot-check form")
 
     # Page signatures: only on error statuses, so a normal page that mentions these words isn't flagged.
     if st not in (401, 403, 405, 406, 429, 503):

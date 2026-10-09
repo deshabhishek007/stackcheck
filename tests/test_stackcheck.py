@@ -480,6 +480,9 @@ class BlockPageTests(unittest.TestCase):
         generic = self.detect(503, "", {}, "Please verify you are a human")
         self.assertEqual((generic["by"], generic["kind"]), (None, "challenge"))
         self.assertEqual(self.detect(429)["kind"], "rate limit")
+        wsid = self.detect(200, '<div id="text">Please wait while your request is being verified...</div>'
+                                "<script>var b='wsidchk';</script>", {"server": "Apache"}, "One moment, please...")
+        self.assertEqual((wsid["by"], wsid["kind"], wsid["status"]), (None, "challenge", 200))
 
     def test_normal_pages_are_not_flagged(self):
         self.assertIsNone(self.detect(200, "<p>Just a moment, loading</p>", {"server": "cloudflare"}, "Just a moment"))
